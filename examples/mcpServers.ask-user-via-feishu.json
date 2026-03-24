@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "ask-user-via-feishu": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["/absolute/path/to/ask_user_via_feishu/start_mcp.py"],
+      "timeout": 36000000,
+      "env": {
+        "APP_ID": "cli_xxx",
+        "APP_SECRET": "xxx",
+        "OWNER_OPEN_ID": "ou_xxx",
+        "REACTION_ENABLED": "true",
+        "REACTION_EMOJI_TYPE": "Typing",
+        "ASK_TIMEOUT_SECONDS": "600",
+        "ASK_TIMEOUT_REMINDER_TEXT": "请及时回复！！！"
+      }
+    }
+  }
+}

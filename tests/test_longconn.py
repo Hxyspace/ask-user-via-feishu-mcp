@@ -1,0 +1,267 @@
+from __future__ import annotations
+
+import json
+import unittest
+
+from ask_user_via_feishu.config import Settings
+from ask_user_via_feishu.longconn import FeishuLongConnectionSubscriber
+from ask_user_via_feishu.shared_longconn import FeishuSharedLongConnectionRuntime, PendingQuestionTimeout
+
+MISSING_RUNTIME_CONFIG = "/home/yuan/code/llm/ask_user_via_feishu/tests/__no_runtime_config__.json"
+
+
+class FakeEventProcessor:
+    def __init__(self) -> None:
+        self.payloads: list[dict[str, object]] = []
+
+    def process_payload(self, payload: dict[str, object]) -> dict[str, object]:
+        self.payloads.append(payload)
+        return {"handled": True, "reply_sent": False}
+
+
+class FakeBuilder:
+    def __init__(self) -> None:
+        self.registrations: list[tuple[str, object]] = []
+
+    def register_p2_im_message_receive_v1(self, handler: object) -> "FakeBuilder":
+        self.registrations.append(("register_p2_im_message_receive_v1", handler))
+        return self
+
+    def register_p2_card_action_trigger(self, handler: object) -> "FakeBuilder":
+        self.registrations.append(("register_p2_card_action_trigger", handler))
+        return self
+
+    def register_p2_customized_event(self, event_type: str, handler: object) -> "FakeBuilder":
+        self.registrations.append((f"register_p2_customized_event:{event_type}", handler))
+        return self
+
+    def build(self) -> "FakeBuilder":
+        return self
+
+
+class FakeEventDispatcherHandler:
+    last_builder: FakeBuilder | None = None
+
+    @classmethod
+    def builder(cls, encrypt_key: str, verification_token: str) -> FakeBuilder:
+        cls.last_builder = FakeBuilder()
+        return cls.last_builder
+
+
+class FakeWSClient:
+    def __init__(self, app_id: str, app_secret: str, *, event_handler: object, log_level: object) -> None:
+        self.app_id = app_id
+        self.app_secret = app_secret
+        self.event_handler = event_handler
+        self.log_level = log_level
+
+    def start(self) -> None:
+        return None
+
+
+class FakeSDK:
+    EventDispatcherHandler = FakeEventDispatcherHandler
+
+    class JSON:
+        @staticmethod
+        def marshal(data: object) -> str:
+            return json.dumps(data, ensure_ascii=False)
+
+    class ws:
+        Client = FakeWSClient
+
+    class LogLevel:
+        INFO = "sdk-info"
+        DEBUG = "sdk-debug"
+
+    class event:
+        class callback:
+            class model:
+                class p2_card_action_trigger:
+                    class CallBackToast:
+                        def __init__(self, d: dict[str, object] | None = None) -> None:
+                            d = d or {}
+                            self.type = d.get("type")
+                            self.content = d.get("content")
+                            self.i18n = d.get("i18n")
+
+                    class CallBackCard:
+                        def __init__(self, d: dict[str, object] | None = None) -> None:
+                            d = d or {}
+                            self.type = d.get("type")
+                            self.data = d.get("data")
+
+                    class P2CardActionTriggerResponse:
+                        def __init__(self, d: dict[str, object] | None = None) -> None:
+                            self.toast = None
+                            self.card = None
+
+
+class LongConnectionTest(unittest.TestCase):
+    def _settings(self) -> Settings:
+        return Settings.from_env(
+            {
+                "APP_ID": "cli_123",
+                "APP_SECRET": "secret_123",
+                "OWNER_OPEN_ID": "ou_owner",
+                "RUNTIME_CONFIG_PATH": MISSING_RUNTIME_CONFIG,
+            }
+        )
+
+    def test_build_event_handler_registers_default_v2_events(self) -> None:
+        subscriber = FeishuLongConnectionSubscriber(self._settings(), FakeEventProcessor(), sdk=FakeSDK)
+
+        handler = subscriber.build_event_handler()
+
+        self.assertIs(handler, FakeEventDispatcherHandler.last_builder)
+        self.assertEqual(
+            [name for name, _ in FakeEventDispatcherHandler.last_builder.registrations],
+            [
+                "register_p2_im_message_receive_v1",
+                "register_p2_card_action_trigger",
+            ],
+        )
+
+    def test_shared_runtime_captures_text_reply(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply",
+                    "chat_id": "oc_123",
+                    "message_type": "text",
+                    "content": '{"text":"hello"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+        result = runtime.wait_for_question("ask_123", 1)
+
+        self.assertEqual(result["text"], "hello")
+        self.assertEqual(result["message_id"], "om_reply")
+
+    def test_shared_runtime_captures_file_reply_without_text(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply",
+                    "chat_id": "oc_123",
+                    "msg_type": "file",
+                    "content": '{"file_key":"file_123","file_name":"report.pdf"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+        result = runtime.wait_for_question("ask_123", 1)
+
+        self.assertEqual(result["text"], "")
+        self.assertEqual(result["resource_refs"][0]["file_key"], "file_123")
+        self.assertEqual(result["resource_refs"][0]["message_id"], "om_reply")
+
+    def test_shared_runtime_captures_post_reply_with_text_and_image(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply",
+                    "chat_id": "oc_123",
+                    "msg_type": "post",
+                    "content": (
+                        '{"title":"","content":[['
+                        '{"tag":"img","image_key":"img_123","width":2000,"height":1333}'
+                        '],[{"tag":"text","text":"你收到这条消息了吗","style":[]}]]}'
+                    ),
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+        result = runtime.wait_for_question("ask_123", 1)
+
+        self.assertEqual(result["text"], "你收到这条消息了吗")
+        self.assertEqual(result["message_type"], "post")
+        self.assertEqual(result["resource_refs"][0]["image_key"], "img_123")
+
+    def test_shared_runtime_captures_card_choice(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+
+        response = runtime.handle_event(
+            "card.action.trigger",
+            {
+                "operator": {"open_id": "ou_owner"},
+                "action": {
+                    "value": {
+                        "action": "feishu_ask_user_choice",
+                        "question_id": "ask_123",
+                        "answer": "Yes",
+                    }
+                },
+                "context": {"open_message_id": "om_question", "open_chat_id": "oc_123"},
+            },
+        )
+        result = runtime.wait_for_question("ask_123", 1)
+
+        self.assertEqual(result["text"], "Yes")
+        self.assertEqual(result["message_type"], "card_action")
+        self.assertEqual(response.toast.content, "已收到你的选择")
+
+    def test_shared_runtime_ignores_non_p2p_text_reply(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply",
+                    "chat_id": "oc_group",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": '{"text":"hello"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+
+        with self.assertRaises(PendingQuestionTimeout):
+            runtime.wait_for_question("ask_123", 0)

@@ -1,0 +1,206 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Any
+
+from ask_user_via_feishu.config import Settings
+from ask_user_via_feishu.errors import MessageValidationError
+from ask_user_via_feishu.schemas import FeishuPostContent
+from ask_user_via_feishu.services.message_service import MessageService
+
+MISSING_RUNTIME_CONFIG = "/home/yuan/code/llm/ask_user_via_feishu/tests/__no_runtime_config__.json"
+
+
+class FakeTokenManager:
+    async def get_token(self) -> str:
+        return "tenant_token"
+
+
+class FakeMessageClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def send_message(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("send_message", {"access_token": access_token, **kwargs}))
+        return {"code": 0, "data": {"message_id": "om_123"}}
+
+    async def upload_image(self, access_token: str, *, image_path: str) -> dict[str, Any]:
+        self.calls.append(("upload_image", {"access_token": access_token, "image_path": image_path}))
+        return {"code": 0, "data": {"image_key": "img_123"}}
+
+    async def upload_file(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("upload_file", {"access_token": access_token, **kwargs}))
+        return {"code": 0, "data": {"file_key": "file_123"}}
+
+    async def update_message_card(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("update_message_card", {"access_token": access_token, **kwargs}))
+        return {"code": 0, "data": {"message_id": kwargs["message_id"]}}
+
+    async def download_message_resource(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("download_message_resource", {"access_token": access_token, **kwargs}))
+        if kwargs["resource_type"] == "image":
+            return {
+                "content": b"image-bytes",
+                "content_type": "image/png",
+                "content_disposition": "",
+            }
+        return {
+            "content": b"file-bytes",
+            "content_type": "application/pdf",
+            "content_disposition": 'attachment; filename="downloaded.pdf"',
+        }
+
+    async def create_message_reaction(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("create_message_reaction", {"access_token": access_token, **kwargs}))
+        return {"code": 0, "data": {"reaction_id": "react_123"}}
+
+    async def delete_message_reaction(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("delete_message_reaction", {"access_token": access_token, **kwargs}))
+        return {"code": 0, "data": {}}
+
+
+class MessageServiceTest(unittest.TestCase):
+    def _settings(self) -> Settings:
+        return Settings.from_env(
+            {
+                "APP_ID": "cli_123",
+                "APP_SECRET": "secret_123",
+                "OWNER_OPEN_ID": "ou_owner",
+                "RUNTIME_CONFIG_PATH": MISSING_RUNTIME_CONFIG,
+            }
+        )
+
+    def test_send_text_uses_owner_as_default_target(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, FakeTokenManager(), self._settings())
+
+        result = asyncio.run(service.send_text(receive_id_type="open_id", receive_id="", text="hello"))
+
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "message_id": "om_123",
+                "receive_id": "ou_owner",
+            },
+        )
+        self.assertEqual(client.calls[0][0], "send_message")
+        self.assertEqual(client.calls[0][1]["receive_id"], "ou_owner")
+
+    def test_send_image_rejects_path_and_key_together(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, FakeTokenManager(), self._settings())
+
+        with self.assertRaises(MessageValidationError):
+            asyncio.run(
+                service.send_image(
+                    receive_id_type="open_id",
+                    receive_id="",
+                    image_path="",
+                )
+            )
+
+    def test_send_file_rejects_unsupported_file_type(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, FakeTokenManager(), self._settings())
+
+        with self.assertRaises(MessageValidationError):
+            asyncio.run(
+                service.upload_file(
+                    file_path="/tmp/a.bin",
+                    file_type="zip",  # type: ignore[arg-type]
+                )
+            )
+
+    def test_create_and_delete_reaction(self) -> None:
+        client = FakeMessageClient()
+        settings = self._settings()
+        service = MessageService(client, FakeTokenManager(), settings)
+
+        created = asyncio.run(service.create_reaction(message_id="om_123"))
+        deleted = asyncio.run(service.delete_reaction(message_id="om_123", reaction_id="react_123"))
+
+        self.assertTrue(created["ok"])
+        self.assertTrue(deleted["ok"])
+        self.assertEqual([name for name, _ in client.calls], ["create_message_reaction", "delete_message_reaction"])
+
+    def test_send_post_accepts_supported_elements(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, FakeTokenManager(), self._settings())
+        content: FeishuPostContent = [
+            [{"tag": "text", "text": "文档："}, {"tag": "a", "text": "README", "href": "https://example.com"}],
+            [{"tag": "at", "user_id": "ou_owner"}, {"tag": "img", "image_key": "img_123"}],
+        ]
+
+        result = asyncio.run(
+            service.send_post(
+                receive_id_type="open_id",
+                receive_id="",
+                title="demo",
+                content=content,
+            )
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "message_id": "om_123",
+                "receive_id": "ou_owner",
+            },
+        )
+        self.assertEqual(client.calls[0][0], "send_message")
+        self.assertEqual(client.calls[0][1]["msg_type"], "post")
+        payload = json.loads(client.calls[0][1]["content"])
+        self.assertEqual(payload["zh_cn"]["title"], "demo")
+        self.assertEqual(payload["zh_cn"]["content"], content)
+
+    def test_send_post_rejects_unsupported_tag(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, FakeTokenManager(), self._settings())
+
+        with self.assertRaises(MessageValidationError):
+            asyncio.run(
+                service.send_post(
+                    receive_id_type="open_id",
+                    receive_id="",
+                    title="demo",
+                    content=[[{"tag": "emotion", "emoji_type": "OK"}]],  # type: ignore[list-item]
+                )
+            )
+
+    def test_download_reply_resources_saves_files_under_receive_files(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, FakeTokenManager(), self._settings())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            previous_cwd = Path.cwd()
+            expected_paths: list[str] = []
+            downloaded_bytes: list[bytes] = []
+            os.chdir(tmpdir)
+            try:
+                paths = asyncio.run(
+                    service.download_reply_resources(
+                        question_id="ask_123",
+                        resource_refs=[
+                            {"kind": "image", "message_id": "om_image", "image_key": "img_123"},
+                            {"kind": "file", "message_id": "om_file", "file_key": "file_123", "file_name": "report.pdf"},
+                        ],
+                    )
+                )
+                expected_paths = list(paths)
+                downloaded_bytes = [Path(path).read_bytes() for path in paths]
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(len(expected_paths), 2)
+        self.assertTrue(expected_paths[0].endswith(".png"))
+        self.assertTrue(expected_paths[1].endswith("report.pdf"))
+        self.assertEqual(downloaded_bytes, [b"image-bytes", b"file-bytes"])
+        for path in expected_paths:
+            self.assertTrue("receive_files" in path)

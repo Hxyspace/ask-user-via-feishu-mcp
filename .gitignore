@@ -1,0 +1,10 @@
+*.egg-info/
+__pycache__/
+.venv/
+.ask_user_via_feishu_deps_stamp
+build/
+dist/
+receive_files/
+.coverage
+.coverage.*
+.env

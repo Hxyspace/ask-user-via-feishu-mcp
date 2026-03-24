@@ -1,0 +1,15 @@
+{
+  "app_id": "cli_xxx",
+  "app_secret": "xxx",
+  "owner_open_id": "ou_xxx",
+  "reaction": {
+    "enabled": true,
+    "emoji_type": "Typing"
+  },
+  "ask": {
+    "timeout_seconds": 600,
+    "reminder_max_attempts": 10,
+    "timeout_reminder_text": "请及时回复！！！",
+    "timeout_default_answer": "[AUTO_RECALL]"
+  }
+}
