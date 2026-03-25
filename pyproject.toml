@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ask-user-via-feishu"
-version = "0.1.0"
 description = "Minimal owner-only Feishu MCP server with shared long connection"
 readme = "README.md"
 requires-python = ">=3.10"
+dynamic = ["version"]
 dependencies = [
   "httpx>=0.27,<1",
   "lark-oapi>=1.5,<2",
@@ -15,11 +15,18 @@ dependencies = [
   "typing-extensions>=4.0,<5",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Hxyspace/ask-user-via-feishu-mcp#readme"
+Repository = "https://github.com/Hxyspace/ask-user-via-feishu-mcp"
+
 [project.scripts]
 ask-user-via-feishu = "ask_user_via_feishu.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "ask_user_via_feishu.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

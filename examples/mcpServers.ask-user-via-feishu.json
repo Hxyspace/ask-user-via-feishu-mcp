@@ -3,7 +3,7 @@
     "ask-user-via-feishu": {
       "type": "stdio",
       "command": "python",
-      "args": ["/absolute/path/to/ask_user_via_feishu/start_mcp.py"],
+      "args": ["-m", "ask_user_via_feishu"],
       "timeout": 36000000,
       "env": {
         "APP_ID": "cli_xxx",

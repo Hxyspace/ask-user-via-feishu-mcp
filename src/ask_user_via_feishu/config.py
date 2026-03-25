@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from ask_user_via_feishu import __version__
+
 
 DEFAULT_RUNTIME_CONFIG_PATH = ""
-SERVER_NAME = "ask-user-via-feishu"
-SERVER_VERSION = "0.1.0"
+SERVER_NAME = (__package__ or "ask_user_via_feishu").replace("_", "-")
+SERVER_VERSION = __version__
 SERVER_TRANSPORT = "stdio"
 
 
