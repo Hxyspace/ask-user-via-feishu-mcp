@@ -11,6 +11,7 @@ from typing import Any
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.errors import MessageValidationError
 from ask_user_via_feishu.schemas import FeishuPostContent
+from ask_user_via_feishu.services import TokenManager
 from ask_user_via_feishu.services.message_service import MessageService
 
 MISSING_RUNTIME_CONFIG = "/home/yuan/code/llm/ask_user_via_feishu/tests/__no_runtime_config__.json"
@@ -21,13 +22,22 @@ class FakeTokenManager:
         return "tenant_token"
 
 
+class FakeAuthClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def get_tenant_access_token(self, app_id: str, app_secret: str) -> tuple[str, int]:
+        self.calls += 1
+        return (f"tenant_token_{self.calls}", 7200)
+
+
 class FakeMessageClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def send_message(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("send_message", {"access_token": access_token, **kwargs}))
-        return {"code": 0, "data": {"message_id": "om_123"}}
+        return {"code": 0, "data": {"message_id": "om_123", "chat_id": "oc_p2p", "create_time": "1234567890123"}}
 
     async def upload_image(self, access_token: str, *, image_path: str) -> dict[str, Any]:
         self.calls.append(("upload_image", {"access_token": access_token, "image_path": image_path}))
@@ -87,6 +97,8 @@ class MessageServiceTest(unittest.TestCase):
                 "ok": True,
                 "message_id": "om_123",
                 "receive_id": "ou_owner",
+                "chat_id": "oc_p2p",
+                "create_time_ms": 1234567890123,
             },
         )
         self.assertEqual(client.calls[0][0], "send_message")
@@ -152,6 +164,8 @@ class MessageServiceTest(unittest.TestCase):
                 "ok": True,
                 "message_id": "om_123",
                 "receive_id": "ou_owner",
+                "chat_id": "oc_p2p",
+                "create_time_ms": 1234567890123,
             },
         )
         self.assertEqual(client.calls[0][0], "send_message")
@@ -173,6 +187,27 @@ class MessageServiceTest(unittest.TestCase):
                     content=[[{"tag": "emotion", "emoji_type": "OK"}]],  # type: ignore[list-item]
                 )
             )
+
+    def test_send_post_can_run_after_send_text_on_a_different_event_loop(self) -> None:
+        client = FakeMessageClient()
+        auth_client = FakeAuthClient()
+        service = MessageService(client, TokenManager(auth_client, self._settings()), self._settings())
+        content: FeishuPostContent = [[{"tag": "text", "text": "hello"}]]
+
+        first = asyncio.run(service.send_text(receive_id_type="open_id", receive_id="", text="first"))
+        service._token_manager._expires_at = 0.0  # force token refresh through a new loop
+        second = asyncio.run(
+            service.send_post(
+                receive_id_type="open_id",
+                receive_id="",
+                title="demo",
+                content=content,
+            )
+        )
+
+        self.assertEqual(first["message_id"], "om_123")
+        self.assertEqual(second["message_id"], "om_123")
+        self.assertEqual(auth_client.calls, 2)
 
     def test_download_reply_resources_saves_files_under_receive_files(self) -> None:
         client = FakeMessageClient()

@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +26,10 @@ class PendingQuestion:
     target_open_id: str
     question: str
     question_message_id: str
+    status: str = "pending_send"
+    created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    sent_at_ms: int = 0
+    target_chat_id: str = ""
     condition: threading.Condition = field(default_factory=threading.Condition)
     result: dict[str, Any] | None = None
 
@@ -105,6 +110,23 @@ class FeishuSharedLongConnectionRuntime:
             self._pending_by_open_id[normalized_open_id] = record
             return record
 
+    def mark_waiting_for_reply(
+        self,
+        question_id: str,
+        *,
+        question_message_id: str,
+        sent_at_ms: int,
+        target_chat_id: str = "",
+    ) -> None:
+        with self._lock:
+            record = self._pending_by_question_id.get(question_id.strip())
+            if record is None:
+                raise ValueError("Pending question not found.")
+            record.question_message_id = question_message_id.strip()
+            record.sent_at_ms = sent_at_ms
+            record.target_chat_id = target_chat_id.strip()
+            record.status = "waiting_reply"
+
     def wait_for_question(self, question_id: str, timeout_seconds: int) -> dict[str, Any]:
         with self._lock:
             record = self._pending_by_question_id.get(question_id.strip())
@@ -117,6 +139,24 @@ class FeishuSharedLongConnectionRuntime:
             record = self._pending_by_question_id.pop(question_id.strip(), None)
             if record is not None:
                 self._pending_by_open_id.pop(record.target_open_id, None)
+
+    def has_pending_question(self) -> bool:
+        with self._lock:
+            return bool(self._pending_by_question_id)
+
+    def current_pending_question_id(self) -> str:
+        with self._lock:
+            for question_id in self._pending_by_question_id:
+                return question_id
+        return ""
+
+    def long_connection_state(self) -> str:
+        if self._startup_error is not None:
+            return "failed"
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return "running"
+        return "stopped"
 
     def handle_event(self, event_type: str, data: Any, *, schema: str = "2.0") -> Any:
         payload = self._subscriber._normalize_payload(event_type, schema=schema, data=data)
@@ -205,23 +245,30 @@ class FeishuSharedLongConnectionRuntime:
             elif text:
                 message_type = "text"
         message_id = str(message.get("message_id") or "").strip()
+        message_chat_id = str(message.get("chat_id") or "").strip()
+        message_create_time_ms = _parse_event_timestamp_ms(message.get("create_time"))
         resource_refs = _extract_resource_refs(content, message_id=message_id)
         if not text and not resource_refs:
             return None
         with self._lock:
             record = self._pending_by_open_id.get(sender_open_id)
-        if record is None:
+        if record is None or record.status != "waiting_reply":
+            return None
+        if record.sent_at_ms and message_create_time_ms is not None and message_create_time_ms < record.sent_at_ms:
+            return None
+        if record.target_chat_id and message_chat_id and message_chat_id != record.target_chat_id:
             return None
         record.resolve(
             {
                 "ok": True,
                 "sender_open_id": sender_open_id,
-                "chat_id": str(message.get("chat_id") or "").strip(),
+                "chat_id": message_chat_id,
                 "message_id": message_id,
                 "message_type": message_type,
                 "text": text,
                 "message_content": content,
                 "resource_refs": resource_refs,
+                "create_time_ms": message_create_time_ms or 0,
                 "callback_response": {},
             }
         )
@@ -249,7 +296,10 @@ class FeishuSharedLongConnectionRuntime:
             return None
         with self._lock:
             record = self._pending_by_question_id.get(target_question_id)
-        if record is None or operator_open_id != record.target_open_id:
+        open_message_id = str(event.get("context", {}).get("open_message_id") or "").strip()
+        if record is None or record.status != "waiting_reply" or operator_open_id != record.target_open_id:
+            return None
+        if record.question_message_id and open_message_id and open_message_id != record.question_message_id:
             return None
         record.resolve(
             {
@@ -260,6 +310,7 @@ class FeishuSharedLongConnectionRuntime:
                 "message_type": "card_action",
                 "text": answer,
                 "message_content": {"text": answer},
+                "create_time_ms": 0,
                 "callback_response": {
                     "toast": {"type": "success", "content": "已收到你的选择"},
                 },
@@ -341,3 +392,19 @@ def _extract_reply_text(message_content: dict[str, Any], *, message_type: str) -
         if paragraph_text:
             text_parts.append(paragraph_text)
     return "\n\n".join(text_parts).strip()
+
+
+def _parse_event_timestamp_ms(value: Any) -> int | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    timestamp = int(normalized)
+    if timestamp <= 0:
+        return None
+    if timestamp < 10_000_000_000:
+        return timestamp * 1000
+    if timestamp < 10_000_000_000_000:
+        return timestamp
+    if timestamp < 10_000_000_000_000_000:
+        return timestamp // 1000
+    return timestamp // 1_000_000

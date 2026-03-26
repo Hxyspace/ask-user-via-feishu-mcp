@@ -456,4 +456,22 @@ class MessageService:
             "ok": True,
             "message_id": str(data.get("message_id") or ""),
             "receive_id": receive_id,
+            "chat_id": str(data.get("chat_id") or ""),
+            "create_time_ms": MessageService._coerce_timestamp_ms(data.get("create_time")),
         }
+
+    @staticmethod
+    def _coerce_timestamp_ms(value: Any) -> int:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return 0
+        timestamp = int(normalized)
+        if timestamp <= 0:
+            return 0
+        if timestamp < 10_000_000_000:
+            return timestamp * 1000
+        if timestamp < 10_000_000_000_000:
+            return timestamp
+        if timestamp < 10_000_000_000_000_000:
+            return timestamp // 1000
+        return timestamp // 1_000_000

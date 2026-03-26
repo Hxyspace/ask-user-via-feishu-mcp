@@ -131,6 +131,12 @@ class LongConnectionTest(unittest.TestCase):
             question="Q",
             question_message_id="om_question",
         )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+            target_chat_id="oc_123",
+        )
 
         runtime.handle_event(
             "im.message.receive_v1",
@@ -138,6 +144,7 @@ class LongConnectionTest(unittest.TestCase):
                 "message": {
                     "message_id": "om_reply",
                     "chat_id": "oc_123",
+                    "create_time": "1000",
                     "message_type": "text",
                     "content": '{"text":"hello"}',
                 },
@@ -158,6 +165,12 @@ class LongConnectionTest(unittest.TestCase):
             question="Q",
             question_message_id="om_question",
         )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+            target_chat_id="oc_123",
+        )
 
         runtime.handle_event(
             "im.message.receive_v1",
@@ -165,6 +178,7 @@ class LongConnectionTest(unittest.TestCase):
                 "message": {
                     "message_id": "om_reply",
                     "chat_id": "oc_123",
+                    "create_time": "1000",
                     "msg_type": "file",
                     "content": '{"file_key":"file_123","file_name":"report.pdf"}',
                 },
@@ -186,6 +200,12 @@ class LongConnectionTest(unittest.TestCase):
             question="Q",
             question_message_id="om_question",
         )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+            target_chat_id="oc_123",
+        )
 
         runtime.handle_event(
             "im.message.receive_v1",
@@ -193,6 +213,7 @@ class LongConnectionTest(unittest.TestCase):
                 "message": {
                     "message_id": "om_reply",
                     "chat_id": "oc_123",
+                    "create_time": "1000",
                     "msg_type": "post",
                     "content": (
                         '{"title":"","content":[['
@@ -217,6 +238,12 @@ class LongConnectionTest(unittest.TestCase):
             target_open_id="ou_owner",
             question="Q",
             question_message_id="om_question",
+        )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+            target_chat_id="oc_123",
         )
 
         response = runtime.handle_event(
@@ -248,6 +275,11 @@ class LongConnectionTest(unittest.TestCase):
             question="Q",
             question_message_id="om_question",
         )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+        )
 
         runtime.handle_event(
             "im.message.receive_v1",
@@ -256,6 +288,133 @@ class LongConnectionTest(unittest.TestCase):
                     "message_id": "om_reply",
                     "chat_id": "oc_group",
                     "chat_type": "group",
+                    "message_type": "text",
+                    "content": '{"text":"hello"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+
+        with self.assertRaises(PendingQuestionTimeout):
+            runtime.wait_for_question("ask_123", 0)
+
+    def test_shared_runtime_ignores_reply_before_question_is_waiting(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="",
+        )
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply",
+                    "chat_id": "oc_123",
+                    "create_time": "2000",
+                    "message_type": "text",
+                    "content": '{"text":"hello"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+
+        with self.assertRaises(PendingQuestionTimeout):
+            runtime.wait_for_question("ask_123", 0)
+
+    def test_shared_runtime_ignores_reply_older_than_sent_at(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=2_000,
+            target_chat_id="oc_123",
+        )
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply",
+                    "chat_id": "oc_123",
+                    "create_time": "1",
+                    "message_type": "text",
+                    "content": '{"text":"old hello"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+
+        with self.assertRaises(PendingQuestionTimeout):
+            runtime.wait_for_question("ask_123", 0)
+
+    def test_shared_runtime_ignores_card_choice_for_different_question_message(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+            target_chat_id="oc_123",
+        )
+
+        runtime.handle_event(
+            "card.action.trigger",
+            {
+                "operator": {"open_id": "ou_owner"},
+                "action": {
+                    "value": {
+                        "action": "feishu_ask_user_choice",
+                        "question_id": "ask_123",
+                        "answer": "Yes",
+                    }
+                },
+                "context": {"open_message_id": "om_other", "open_chat_id": "oc_123"},
+            },
+        )
+
+        with self.assertRaises(PendingQuestionTimeout):
+            runtime.wait_for_question("ask_123", 0)
+
+    def test_shared_runtime_ignores_reply_from_different_chat_when_target_chat_known(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+            target_chat_id="oc_expected",
+        )
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply",
+                    "chat_id": "oc_other",
+                    "create_time": "1000",
                     "message_type": "text",
                     "content": '{"text":"hello"}',
                 },
