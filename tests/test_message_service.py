@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 import os
 import tempfile
@@ -212,30 +213,52 @@ class MessageServiceTest(unittest.TestCase):
     def test_download_reply_resources_saves_files_under_receive_files(self) -> None:
         client = FakeMessageClient()
         service = MessageService(client, FakeTokenManager(), self._settings())
+        expected_bucket = datetime.now().strftime("%Y-%m-%d")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            previous_cwd = Path.cwd()
             expected_paths: list[str] = []
             downloaded_bytes: list[bytes] = []
-            os.chdir(tmpdir)
-            try:
-                paths = asyncio.run(
-                    service.download_reply_resources(
-                        question_id="ask_123",
-                        resource_refs=[
-                            {"kind": "image", "message_id": "om_image", "image_key": "img_123"},
-                            {"kind": "file", "message_id": "om_file", "file_key": "file_123", "file_name": "report.pdf"},
-                        ],
-                    )
+            target_root = Path(tmpdir) / "attachments"
+            paths = asyncio.run(
+                service.download_reply_resources(
+                    question_id="ask_123",
+                    resource_refs=[
+                        {"kind": "image", "message_id": "om_image", "image_key": "img_123"},
+                        {"kind": "file", "message_id": "om_file", "file_key": "file_123", "file_name": "report.pdf"},
+                    ],
+                    target_root=target_root,
                 )
-                expected_paths = list(paths)
-                downloaded_bytes = [Path(path).read_bytes() for path in paths]
-            finally:
-                os.chdir(previous_cwd)
+            )
+            expected_paths = list(paths)
+            downloaded_bytes = [Path(path).read_bytes() for path in paths]
 
         self.assertEqual(len(expected_paths), 2)
         self.assertTrue(expected_paths[0].endswith(".png"))
         self.assertTrue(expected_paths[1].endswith("report.pdf"))
         self.assertEqual(downloaded_bytes, [b"image-bytes", b"file-bytes"])
         for path in expected_paths:
-            self.assertTrue("receive_files" in path)
+            self.assertIn(str(Path("attachments") / expected_bucket), path)
+
+    def test_download_reply_resources_uses_fallback_name_for_same_day_collision(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, FakeTokenManager(), self._settings())
+        expected_bucket = datetime.now().strftime("%Y-%m-%d")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_root = Path(tmpdir) / "attachments"
+            bucket_dir = target_root / expected_bucket
+            bucket_dir.mkdir(parents=True, exist_ok=True)
+            (bucket_dir / "report.pdf").write_bytes(b"existing-1")
+
+            paths = asyncio.run(
+                service.download_reply_resources(
+                    question_id="ask_123",
+                    resource_refs=[
+                        {"kind": "file", "message_id": "om_file", "file_key": "file_123", "file_name": "report.pdf"},
+                    ],
+                    target_root=target_root,
+                )
+            )
+
+        self.assertEqual(len(paths), 1)
+        self.assertTrue(paths[0].endswith("report_file_file_123.pdf"))

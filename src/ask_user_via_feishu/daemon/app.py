@@ -19,7 +19,12 @@ class SharedLongConnDaemonApp:
         self._message_service = build_message_service(settings)
         event_processor = build_event_processor(settings)
         shared_runtime = FeishuSharedLongConnectionRuntime(settings, event_processor)
-        self._ask_runtime = AskRuntimeOrchestrator(settings, self._message_service, shared_runtime)
+        self._ask_runtime = AskRuntimeOrchestrator(
+            settings,
+            self._message_service,
+            shared_runtime,
+            download_root=self._runtime_dir / "attachments",
+        )
         self._shared_runtime = shared_runtime
         self._initialized = False
         self._server = SharedLongConnDaemonServer(

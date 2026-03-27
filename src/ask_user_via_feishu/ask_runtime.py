@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 import time
 from dataclasses import dataclass
 import uuid as uuid_lib
@@ -126,10 +127,13 @@ class AskRuntimeOrchestrator:
         settings: Settings,
         service: MessageService,
         shared_runtime: FeishuSharedLongConnectionRuntime,
+        *,
+        download_root: Path | None = None,
     ) -> None:
         self._settings = settings
         self._service = service
         self._shared_runtime = shared_runtime
+        self._download_root = None if download_root is None else download_root.expanduser().resolve()
         self._pending_processing_reaction: dict[str, str] | None = None
 
     async def ask(
@@ -212,6 +216,7 @@ class AskRuntimeOrchestrator:
             downloaded_paths = await self._service.download_reply_resources(
                 question_id=question_id,
                 resource_refs=list(wait_result.get("resource_refs") or []),
+                target_root=self._download_root,
             )
             user_answer = str(wait_result.get("text") or "").strip()
             if question_message_id:

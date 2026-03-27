@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import unittest
 
 from ask_user_via_feishu.ask_runtime import (
@@ -90,7 +91,12 @@ class FakeFileOnlyRuntime:
 
 
 class FakeDownloadMessageService(FakeTimeoutMessageService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.download_calls: list[dict] = []
+
     async def download_reply_resources(self, **kwargs):
+        self.download_calls.append(kwargs)
         return ["/tmp/receive_files/ask_123/report.pdf"]
 
 
@@ -207,7 +213,12 @@ class AskRuntimeTest(unittest.TestCase):
         return Settings.from_env(env)
 
     def _run_ask(self, settings: Settings, service, runtime, **kwargs):
-        orchestrator = AskRuntimeOrchestrator(settings, service, runtime)
+        orchestrator = AskRuntimeOrchestrator(
+            settings,
+            service,
+            runtime,
+            download_root=kwargs.get("download_root"),
+        )
         return asyncio.run(
             orchestrator.ask(
                 question=kwargs.get("question", "还继续吗？"),
@@ -320,12 +331,20 @@ class AskRuntimeTest(unittest.TestCase):
     def test_returns_file_paths_and_reask_hint_for_file_only_reply(self) -> None:
         settings = self._settings()
         fake_service = FakeDownloadMessageService()
+        download_root = Path("/tmp/daemon-runtime/attachments")
 
-        result = self._run_ask(settings, fake_service, FakeFileOnlyRuntime(), question="把资料发我")
+        result = self._run_ask(
+            settings,
+            fake_service,
+            FakeFileOnlyRuntime(),
+            question="把资料发我",
+            download_root=download_root,
+        )
 
         self.assertEqual(result["status"], "answered")
         self.assertEqual(result["user_answer"], ASK_RESOURCES_ONLY_ANSWER)
         self.assertEqual(result["downloaded_paths"], ["/tmp/receive_files/ask_123/report.pdf"])
+        self.assertEqual(fake_service.download_calls[0]["target_root"], download_root)
 
     def test_next_ask_clears_previous_processing_reaction(self) -> None:
         settings = self._settings(REACTION_ENABLED="true")

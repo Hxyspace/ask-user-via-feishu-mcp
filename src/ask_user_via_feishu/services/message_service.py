@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -292,13 +293,16 @@ class MessageService:
         *,
         question_id: str,
         resource_refs: list[dict[str, Any]],
+        target_root: Path | None,
     ) -> list[str]:
         resolved_question_id = question_id.strip()
         if not resolved_question_id:
             raise MessageValidationError("question_id must not be empty.")
         if not resource_refs:
             return []
-        target_dir = (Path.cwd() / "receive_files" / resolved_question_id).resolve()
+        if target_root is None:
+            raise MessageValidationError("target_root must not be empty.")
+        target_dir = (target_root.expanduser().resolve() / self._download_bucket_name()).resolve()
         target_dir.mkdir(parents=True, exist_ok=True)
         token = await self._token_manager.get_token()
         saved_paths: list[str] = []
@@ -419,9 +423,12 @@ class MessageService:
             suffix = self._guess_extension(content_type)
             raw_name = f"{fallback_name}{suffix}"
         candidate = target_dir / raw_name
-        if candidate.exists():
-            candidate = target_dir / f"{candidate.stem}_{fallback_name}{candidate.suffix}"
-        return candidate
+        if not candidate.exists():
+            return candidate
+        return target_dir / f"{candidate.stem}_{fallback_name}{candidate.suffix}"
+
+    def _download_bucket_name(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d")
 
     def _guess_extension(self, content_type: str) -> str:
         mime_type = content_type.split(";", 1)[0].strip().lower()
