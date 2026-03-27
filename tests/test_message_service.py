@@ -104,6 +104,11 @@ class MessageServiceTest(unittest.TestCase):
         )
         self.assertEqual(client.calls[0][0], "send_message")
         self.assertEqual(client.calls[0][1]["receive_id"], "ou_owner")
+        self.assertEqual(client.calls[0][1]["msg_type"], "post")
+        self.assertEqual(
+            json.loads(client.calls[0][1]["content"]),
+            {"zh_cn": {"content": [[{"tag": "md", "text": "hello", }]]}},
+        )
 
     def test_send_image_rejects_path_and_key_together(self) -> None:
         client = FakeMessageClient()
@@ -147,7 +152,13 @@ class MessageServiceTest(unittest.TestCase):
         service = MessageService(client, FakeTokenManager(), self._settings())
         content: FeishuPostContent = [
             [{"tag": "text", "text": "文档："}, {"tag": "a", "text": "README", "href": "https://example.com"}],
-            [{"tag": "at", "user_id": "ou_owner"}, {"tag": "img", "image_key": "img_123"}],
+            [{"tag": "at", "user_id": "ou_owner"}],
+            [{"tag": "img", "image_key": "img_123"}],
+            [{"tag": "media", "file_key": "file_123"}],
+            [{"tag": "emotion", "emoji_type": "SMILE"}],
+            [{"tag": "hr"}],
+            [{"tag": "code_block", "language": "GO", "text": "func main() int64 {\n    return 0\n}"}],
+            [{"tag": "md", "text": "**mention user:**<at user_id=\"ou_owner\">Owner</at>"}],
         ]
 
         result = asyncio.run(
@@ -175,7 +186,7 @@ class MessageServiceTest(unittest.TestCase):
         self.assertEqual(payload["zh_cn"]["title"], "demo")
         self.assertEqual(payload["zh_cn"]["content"], content)
 
-    def test_send_post_rejects_unsupported_tag(self) -> None:
+    def test_send_post_rejects_unknown_tag(self) -> None:
         client = FakeMessageClient()
         service = MessageService(client, FakeTokenManager(), self._settings())
 
@@ -185,7 +196,40 @@ class MessageServiceTest(unittest.TestCase):
                     receive_id_type="open_id",
                     receive_id="",
                     title="demo",
-                    content=[[{"tag": "emotion", "emoji_type": "OK"}]],  # type: ignore[list-item]
+                    content=[[{"tag": "unknown", "text": "OK"}]],  # type: ignore[list-item]
+                )
+            )
+
+    def test_send_post_rejects_media_without_file_key(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, FakeTokenManager(), self._settings())
+
+        with self.assertRaises(MessageValidationError):
+            asyncio.run(
+                service.send_post(
+                    receive_id_type="open_id",
+                    receive_id="",
+                    title="demo",
+                    content=[[{"tag": "media", "image_key": "img_123"}]],  # type: ignore[list-item]
+                )
+            )
+
+    def test_send_post_rejects_markdown_mixed_with_other_elements(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, FakeTokenManager(), self._settings())
+
+        with self.assertRaises(MessageValidationError):
+            asyncio.run(
+                service.send_post(
+                    receive_id_type="open_id",
+                    receive_id="",
+                    title="demo",
+                    content=[
+                        [
+                            {"tag": "md", "text": "**bold**"},
+                            {"tag": "text", "text": "should not be here"},
+                        ]
+                    ],
                 )
             )
 

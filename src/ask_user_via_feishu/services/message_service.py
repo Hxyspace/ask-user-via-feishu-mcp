@@ -53,12 +53,13 @@ class MessageService:
         if not text.strip():
             raise MessageValidationError("text must not be empty.")
         token = await self._token_manager.get_token()
+        content = json.dumps({"zh_cn": {"content": [[{"tag": "md", "text": text}]]}}, ensure_ascii=False)
         response = await self._message_client.send_message(
             token,
             receive_id_type=resolved_receive_id_type,
             receive_id=resolved_receive_id,
-            msg_type="text",
-            content=json.dumps({"text": text}, ensure_ascii=False),
+            msg_type="post",
+            content=content,
             uuid=uuid,
         )
         return self._normalize_result(response, resolved_receive_id)
@@ -385,7 +386,9 @@ class MessageService:
                     )
                 tag = str(element.get("tag") or "").strip()
                 if tag not in VALID_FEISHU_POST_TAGS:
-                    raise MessageValidationError("post element tag must be one of text, a, at, img.")
+                    raise MessageValidationError(
+                        "post element tag must be one of text, a, at, img, media, emotion, hr, code_block, md."
+                    )
                 if tag == "text":
                     self._require_post_string_field(element, "text", paragraph_index, element_index)
                 elif tag == "a":
@@ -394,7 +397,27 @@ class MessageService:
                 elif tag == "at":
                     self._require_post_string_field(element, "user_id", paragraph_index, element_index)
                 elif tag == "img":
+                    self._require_standalone_post_element(tag, paragraph, paragraph_index, element_index)
                     self._require_post_string_field(element, "image_key", paragraph_index, element_index)
+                elif tag == "media":
+                    self._require_standalone_post_element(tag, paragraph, paragraph_index, element_index)
+                    self._require_post_string_field(element, "file_key", paragraph_index, element_index)
+                    self._validate_optional_post_string_field(
+                        element, "image_key", paragraph_index, element_index
+                    )
+                elif tag == "emotion":
+                    self._require_post_string_field(element, "emoji_type", paragraph_index, element_index)
+                elif tag == "hr":
+                    self._require_standalone_post_element(tag, paragraph, paragraph_index, element_index)
+                elif tag == "code_block":
+                    self._require_standalone_post_element(tag, paragraph, paragraph_index, element_index)
+                    self._require_post_string_field(element, "text", paragraph_index, element_index)
+                    self._validate_optional_post_string_field(
+                        element, "language", paragraph_index, element_index
+                    )
+                elif tag == "md":
+                    self._require_standalone_post_element(tag, paragraph, paragraph_index, element_index)
+                    self._require_post_string_field(element, "text", paragraph_index, element_index)
         return content
 
     def _require_post_string_field(
@@ -408,6 +431,29 @@ class MessageService:
         if not value:
             raise MessageValidationError(
                 f"post element {paragraph_index}.{element_index} field '{field_name}' must be a non-empty string."
+            )
+
+    def _validate_optional_post_string_field(
+        self,
+        element: dict[str, Any],
+        field_name: str,
+        paragraph_index: int,
+        element_index: int,
+    ) -> None:
+        if field_name not in element:
+            return
+        self._require_post_string_field(element, field_name, paragraph_index, element_index)
+
+    def _require_standalone_post_element(
+        self,
+        tag: str,
+        paragraph: list[dict[str, Any]],
+        paragraph_index: int,
+        element_index: int,
+    ) -> None:
+        if len(paragraph) != 1:
+            raise MessageValidationError(
+                f"post element {paragraph_index}.{element_index} with tag '{tag}' must be in its own paragraph."
             )
 
     def _build_download_target_path(

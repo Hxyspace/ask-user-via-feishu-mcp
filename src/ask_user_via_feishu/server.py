@@ -252,7 +252,7 @@ def create_server(settings: Settings) -> FastMCP:
             locale: str = "zh_cn",
             uuid: str | None = None,
         ) -> dict[str, Any]:
-            """Send a Feishu post rich-text message to the configured owner using paragraph arrays of text, a, at, or img elements."""
+            """Send a Feishu post rich-text message using official text, a, at, img, media, emotion, hr, code_block, or md nodes."""
             logger.info("Sending post message to configured owner")
             receive_id_type, receive_id = _owner_receive_target()
             await _send_via_daemon_with_fallback(
