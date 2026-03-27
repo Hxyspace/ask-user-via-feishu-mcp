@@ -6,9 +6,10 @@ import unittest
 from typing import get_type_hints
 from unittest.mock import patch
 
+from ask_user_via_feishu.ask_runtime import ASK_LOCAL_FALLBACK_ANSWER
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.daemon.bootstrap import DaemonBootstrapError
-from ask_user_via_feishu.ipc.client import DaemonTransportError
+from ask_user_via_feishu.ipc.client import DaemonAskRetryableError, DaemonTransportError
 from ask_user_via_feishu.schemas import FeishuPostContent
 from ask_user_via_feishu.server import _build_ask_user_options_card, _resolve_enabled_mcp_tools, create_server
 
@@ -145,6 +146,49 @@ class ServerTest(unittest.TestCase):
             ask_tool = server._tool_manager._tools["ask_user_via_feishu"].fn
             with self.assertRaisesRegex(ValueError, "daemon conflict"):
                 asyncio.run(ask_tool(question="还继续吗？", choices=None))
+
+    def test_ask_user_retries_once_on_retryable_daemon_failure(self) -> None:
+        settings = self._settings()
+        first_client = FakeDaemonClient(error=DaemonAskRetryableError("retry", retry_stage="after_send"))
+        second_client = FakeDaemonClient()
+
+        with (
+            patch("ask_user_via_feishu.server.build_message_service", return_value=FakeSendToolMessageService()),
+            patch("ask_user_via_feishu.server.ensure_daemon_running", side_effect=[object(), object()]) as ensure_mock,
+            patch(
+                "ask_user_via_feishu.server.SharedLongConnDaemonClient",
+                side_effect=[first_client, second_client],
+            ),
+        ):
+            server = create_server(settings)
+            ask_tool = server._tool_manager._tools["ask_user_via_feishu"].fn
+            result = asyncio.run(ask_tool(question="还继续吗？", choices=["是", "否"], uuid="req_123"))
+
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(result["user_answer"], "answer")
+        self.assertEqual(ensure_mock.call_count, 2)
+        self.assertEqual(first_client.calls[0]["uuid"], "req_123")
+        self.assertNotEqual(second_client.calls[0]["uuid"], "req_123")
+        self.assertIn("_retry_", second_client.calls[0]["uuid"])
+
+    def test_ask_user_returns_local_fallback_when_retry_cannot_reach_fresh_daemon(self) -> None:
+        settings = self._settings()
+        first_client = FakeDaemonClient(error=DaemonAskRetryableError("retry", retry_stage="after_send"))
+
+        with (
+            patch("ask_user_via_feishu.server.build_message_service", return_value=FakeSendToolMessageService()),
+            patch(
+                "ask_user_via_feishu.server.ensure_daemon_running",
+                side_effect=[object(), DaemonBootstrapError("daemon unavailable")],
+            ),
+            patch("ask_user_via_feishu.server.SharedLongConnDaemonClient", side_effect=[first_client]),
+        ):
+            server = create_server(settings)
+            ask_tool = server._tool_manager._tools["ask_user_via_feishu"].fn
+            result = asyncio.run(ask_tool(question="还继续吗？", choices=None, uuid="req_123"))
+
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(result["user_answer"], ASK_LOCAL_FALLBACK_ANSWER)
 
     def test_send_text_tool_returns_minimal_public_result(self) -> None:
         settings = self._settings()

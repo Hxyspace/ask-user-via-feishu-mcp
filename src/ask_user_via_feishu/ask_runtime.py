@@ -9,9 +9,14 @@ import uuid as uuid_lib
 from typing import Any
 
 from ask_user_via_feishu.config import Settings
-from ask_user_via_feishu.errors import FeishuAPIError, MessageValidationError
+from ask_user_via_feishu.errors import FeishuAPIError, MessageValidationError, RetryableAskError
+from ask_user_via_feishu.longconn import LongConnectionSetupError
 from ask_user_via_feishu.services.message_service import MessageService
-from ask_user_via_feishu.shared_longconn import FeishuSharedLongConnectionRuntime, PendingQuestionTimeout
+from ask_user_via_feishu.shared_longconn import (
+    FeishuSharedLongConnectionRuntime,
+    PendingQuestionAborted,
+    PendingQuestionTimeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +29,10 @@ ASK_RESOURCES_ONLY_ANSWER = (
     "The user only sent resource files, and the file paths have already been returned. "
     "Review the files and ask a follow-up question now. Do not stop, do not summarize, and do not end "
     "the conversation. Keep waiting until the user provides a valid reply."
+)
+ASK_LOCAL_FALLBACK_ANSWER = (
+    "The shared Feishu ask flow was interrupted twice by daemon long-connection failures. "
+    "Switch to local ask_user now. Do not stop, do not summarize, and do not end the conversation."
 )
 
 
@@ -155,7 +164,13 @@ class AskRuntimeOrchestrator:
             raise ValueError("ask_user_via_feishu currently only supports open_id receive targets.")
         if not target_open_id:
             raise ValueError("receive_id must not be empty.")
-        self._shared_runtime.ensure_started()
+        try:
+            self._shared_runtime.ensure_started()
+        except LongConnectionSetupError as exc:
+            raise RetryableAskError(
+                "Shared Feishu long connection is unavailable before sending the question.",
+                retry_stage="before_send",
+            ) from exc
         await self._best_effort_clear_processing_reaction()
         question_id = f"ask_{uuid_lib.uuid4().hex[:8]}"
         normalized_choices = [choice.strip() for choice in (choices or []) if choice and choice.strip()]
@@ -195,6 +210,19 @@ class AskRuntimeOrchestrator:
                         wait_options.timeout_seconds,
                     )
                     break
+                except PendingQuestionAborted as exc:
+                    if question_message_id:
+                        await self._best_effort_update_question_card(
+                            message_id=question_message_id,
+                            card=build_ask_user_expired_card(
+                                question=question_text,
+                                notice="共享长连接已中断。该问题已过期，请忽略此卡片；系统会自动重新发起一次提问。",
+                            ),
+                        )
+                    raise RetryableAskError(
+                        "Shared Feishu long connection failed while waiting for the reply.",
+                        retry_stage="after_send",
+                    ) from exc
                 except PendingQuestionTimeout:
                     timeout_attempt += 1
                     timeout_result = await self._handle_ask_timeout(

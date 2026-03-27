@@ -12,7 +12,7 @@ from typing import Any, Callable
 import uuid
 
 from ask_user_via_feishu.config import SERVER_NAME, SERVER_VERSION, Settings
-from ask_user_via_feishu.errors import FeishuAPIError, MessageValidationError
+from ask_user_via_feishu.errors import FeishuAPIError, MessageValidationError, RetryableAskError
 from ask_user_via_feishu.daemon.runtime import (
     DAEMON_HOST,
     DAEMON_PROTOCOL_VERSION,
@@ -146,16 +146,18 @@ class SharedLongConnDaemonServer:
         if handler.path == "/v1/health":
             status_payload = self._status_provider() if self._status_provider is not None else {}
             long_connection_state = str(status_payload.get("long_connection_state") or "stopped")
+            daemon_state = str(status_payload.get("daemon_state") or "serving")
             self._send_json(
                 handler,
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "ready": long_connection_state != "failed",
+                    "ready": daemon_state == "serving" and long_connection_state != "failed",
                     "service": SERVER_NAME,
                     "version": SERVER_VERSION,
                     "protocol_version": self._metadata.protocol_version,
                     "daemon_epoch": self._daemon_epoch,
+                    "daemon_state": daemon_state,
                     "long_connection_state": long_connection_state,
                 },
             )
@@ -170,6 +172,8 @@ class SharedLongConnDaemonServer:
                     "ok": True,
                     "protocol_version": self._metadata.protocol_version,
                     "daemon_epoch": self._daemon_epoch,
+                    "daemon_state": str(status_payload.get("daemon_state") or "serving"),
+                    "failure_reason": str(status_payload.get("failure_reason") or ""),
                     "long_connection_state": str(status_payload.get("long_connection_state") or "stopped"),
                     "pending_ask": bool(status_payload.get("pending_ask") or False),
                     "pending_question_id": str(status_payload.get("pending_question_id") or ""),
@@ -206,6 +210,17 @@ class SharedLongConnDaemonServer:
             return
         except FeishuAPIError as exc:
             self._send_json(handler, HTTPStatus.BAD_GATEWAY, {"ok": False, "error": str(exc)})
+            return
+        except RetryableAskError as exc:
+            self._send_json(
+                handler,
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": f"ask_retryable_{exc.retry_stage}",
+                },
+            )
             return
         except RuntimeError as exc:
             self._send_json(handler, HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})

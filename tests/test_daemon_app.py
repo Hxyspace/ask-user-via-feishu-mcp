@@ -3,10 +3,11 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.daemon.app import SharedLongConnDaemonApp
+from ask_user_via_feishu.errors import RetryableAskError
 
 
 class FakeMessageService:
@@ -71,3 +72,57 @@ class DaemonAppTest(unittest.TestCase):
 
         self.assertEqual(service.health_calls, 1)
         self.assertFalse(token_cache_path.exists())
+
+    def test_terminal_daemon_rejects_new_asks(self) -> None:
+        service = FakeMessageService()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            with (
+                patch("ask_user_via_feishu.daemon.app.build_message_service", return_value=service),
+                patch("ask_user_via_feishu.daemon.app.build_event_processor", return_value=object()),
+                patch("ask_user_via_feishu.daemon.app.FeishuSharedLongConnectionRuntime", return_value=FakeSharedRuntime()),
+            ):
+                app = SharedLongConnDaemonApp(self._settings(), runtime_dir=runtime_dir)
+                self.addCleanup(app._server.close)
+                app._daemon_state = "terminal_failed"
+                app._failure_reason = "ws failed"
+
+                with self.assertRaises(RetryableAskError) as error:
+                    app._ask_and_wait(
+                        {
+                            "question": "继续吗？",
+                            "choices": [],
+                            "receive_id_type": "open_id",
+                            "receive_id": "ou_demo",
+                            "timeout_seconds": 60,
+                            "reminder_max_attempts": 0,
+                            "timeout_reminder_text": "",
+                            "timeout_default_answer": "",
+                        }
+                    )
+
+        self.assertEqual(error.exception.retry_stage, "before_send")
+
+    def test_terminal_failure_updates_status_and_retires_daemon(self) -> None:
+        service = FakeMessageService()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            with (
+                patch("ask_user_via_feishu.daemon.app.build_message_service", return_value=service),
+                patch("ask_user_via_feishu.daemon.app.build_event_processor", return_value=object()),
+                patch("ask_user_via_feishu.daemon.app.FeishuSharedLongConnectionRuntime", return_value=FakeSharedRuntime()),
+            ):
+                app = SharedLongConnDaemonApp(self._settings(), runtime_dir=runtime_dir)
+                self.addCleanup(app._server.close)
+                app._server.shutdown = Mock()
+                app._terminal_shutdown_delay_seconds = 0
+
+                app._handle_terminal_failure(RuntimeError("ws failed"))
+                if app._retirement_thread is not None:
+                    app._retirement_thread.join(1)
+
+                status = app._status()
+
+        self.assertEqual(status["daemon_state"], "shutting_down")
+        self.assertEqual(status["failure_reason"], "ws failed")
+        app._server.shutdown.assert_called_once()

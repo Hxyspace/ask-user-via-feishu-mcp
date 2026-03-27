@@ -20,3 +20,11 @@ class FeishuAPIError(FeishuBotMCPError):
 
 class MessageValidationError(FeishuBotMCPError):
     """Raised when message input is invalid."""
+
+
+class RetryableAskError(FeishuBotMCPError):
+    """Raised when the current daemon ask should be retried on a fresh daemon."""
+
+    def __init__(self, message: str, *, retry_stage: str) -> None:
+        super().__init__(message)
+        self.retry_stage = retry_stage

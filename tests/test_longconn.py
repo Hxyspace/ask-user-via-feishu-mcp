@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import time
 import unittest
 
 from ask_user_via_feishu.config import Settings
-from ask_user_via_feishu.longconn import FeishuLongConnectionSubscriber
-from ask_user_via_feishu.shared_longconn import FeishuSharedLongConnectionRuntime, PendingQuestionTimeout
+from ask_user_via_feishu.longconn import FeishuLongConnectionSubscriber, LongConnectionSetupError
+from ask_user_via_feishu.shared_longconn import (
+    FeishuSharedLongConnectionRuntime,
+    PendingQuestionAborted,
+    PendingQuestionTimeout,
+)
 
 MISSING_RUNTIME_CONFIG = "/home/yuan/code/llm/ask_user_via_feishu/tests/__no_runtime_config__.json"
 
@@ -59,6 +64,11 @@ class FakeWSClient:
         return None
 
 
+class FakeFailingWSClient(FakeWSClient):
+    def start(self) -> None:
+        raise RuntimeError("ws failed")
+
+
 class FakeSDK:
     EventDispatcherHandler = FakeEventDispatcherHandler
 
@@ -95,6 +105,11 @@ class FakeSDK:
                         def __init__(self, d: dict[str, object] | None = None) -> None:
                             self.toast = None
                             self.card = None
+
+
+class FakeFailingSDK(FakeSDK):
+    class ws:
+        Client = FakeFailingWSClient
 
 
 class LongConnectionTest(unittest.TestCase):
@@ -424,3 +439,74 @@ class LongConnectionTest(unittest.TestCase):
 
         with self.assertRaises(PendingQuestionTimeout):
             runtime.wait_for_question("ask_123", 0)
+
+    def test_shared_runtime_aborts_pending_question_when_longconn_fails(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeFailingSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+            target_chat_id="oc_123",
+        )
+
+        runtime.start()
+        deadline = time.monotonic() + 1
+        while runtime.long_connection_state() != "failed" and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        with self.assertRaises(PendingQuestionAborted):
+            runtime.wait_for_question("ask_123", 1)
+
+    def test_shared_runtime_reports_terminal_failure_callback(self) -> None:
+        processor = FakeEventProcessor()
+        failures: list[str] = []
+        runtime = FeishuSharedLongConnectionRuntime(
+            self._settings(),
+            processor,
+            sdk=FakeFailingSDK,
+            on_terminal_failure=lambda exc: failures.append(str(exc)),
+        )
+
+        runtime.start()
+        deadline = time.monotonic() + 1
+        while not failures and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(failures, ["ws failed"])
+
+    def test_shared_runtime_returns_captured_reply_even_after_terminal_failure(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        record = runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+            target_chat_id="oc_123",
+        )
+        record.resolve({"ok": True, "text": "hello", "message_id": "om_reply"})
+        runtime._startup_error = RuntimeError("ws failed")
+
+        result = runtime.wait_for_question("ask_123", 1)
+
+        self.assertEqual(result["text"], "hello")
+
+    def test_shared_runtime_refuses_restart_after_terminal_failure(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime._startup_error = RuntimeError("ws failed")
+
+        with self.assertRaises(LongConnectionSetupError):
+            runtime.ensure_started()

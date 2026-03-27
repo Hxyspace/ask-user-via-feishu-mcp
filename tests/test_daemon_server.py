@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.daemon.runtime import load_metadata, load_token
 from ask_user_via_feishu.daemon.server import SharedLongConnDaemonServer
+from ask_user_via_feishu.errors import RetryableAskError
 
 
 class DaemonServerTest(unittest.TestCase):
@@ -85,6 +86,73 @@ class DaemonServerTest(unittest.TestCase):
             self.assertEqual(response["status"], "answered")
             self.assertEqual(response["user_answer"], "done")
             self.assertEqual(response["daemon_epoch"], daemon.metadata.daemon_epoch)
+
+    def test_ask_and_wait_route_returns_retryable_error_code(self) -> None:
+        settings = Settings(
+            app_id="cli_demo",
+            app_secret="secret_demo",
+            owner_open_id="ou_demo",
+        )
+
+        def ask_handler(payload: dict[str, object]) -> dict[str, object]:
+            raise RetryableAskError("retry me", retry_stage="after_send")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            daemon = SharedLongConnDaemonServer(settings, Path(tmpdir), ask_handler=ask_handler)
+            thread = daemon.start_background()
+            self.addCleanup(daemon.shutdown)
+            self.addCleanup(thread.join, 1)
+
+            with self.assertRaises(HTTPError) as error:
+                self._post_json(
+                    f"http://127.0.0.1:{daemon.metadata.port}/v1/ask_and_wait",
+                    token=daemon.token,
+                    payload={
+                        "question": "继续吗？",
+                        "choices": [],
+                        "receive_id_type": "open_id",
+                        "receive_id": "ou_demo",
+                    },
+                )
+
+            response = json.loads(error.exception.read().decode("utf-8"))
+
+        self.assertEqual(error.exception.code, 503)
+        self.assertEqual(response["error_code"], "ask_retryable_after_send")
+
+    def test_health_and_status_reflect_terminal_daemon_state(self) -> None:
+        settings = Settings(
+            app_id="cli_demo",
+            app_secret="secret_demo",
+            owner_open_id="ou_demo",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            daemon = SharedLongConnDaemonServer(
+                settings,
+                Path(tmpdir),
+                status_provider=lambda: {
+                    "daemon_state": "terminal_failed",
+                    "failure_reason": "ws failed",
+                    "long_connection_state": "failed",
+                },
+            )
+            thread = daemon.start_background()
+            self.addCleanup(daemon.shutdown)
+            self.addCleanup(thread.join, 1)
+
+            health = self._fetch_json(
+                f"http://127.0.0.1:{daemon.metadata.port}/v1/health",
+                token=daemon.token,
+            )
+            status = self._fetch_json(
+                f"http://127.0.0.1:{daemon.metadata.port}/v1/status",
+                token=daemon.token,
+            )
+
+        self.assertFalse(health["ready"])
+        self.assertEqual(health["daemon_state"], "terminal_failed")
+        self.assertEqual(status["daemon_state"], "terminal_failed")
+        self.assertEqual(status["failure_reason"], "ws failed")
 
     def test_send_text_route_returns_handler_result(self) -> None:
         settings = Settings(

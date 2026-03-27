@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from ask_user_via_feishu.ask_runtime import (
     ASK_AUTO_RECALL_ANSWER,
+    ASK_LOCAL_FALLBACK_ANSWER,
     ASK_RESOURCES_ONLY_ANSWER,
     AskWaitOptions,
     build_ask_user_options_card as _build_ask_user_options_card,
@@ -17,7 +18,11 @@ from ask_user_via_feishu.ask_runtime import (
 )
 from ask_user_via_feishu.config import SERVER_NAME, Settings
 from ask_user_via_feishu.daemon.bootstrap import DaemonBootstrapError, ensure_daemon_running
-from ask_user_via_feishu.ipc.client import DaemonTransportError, SharedLongConnDaemonClient
+from ask_user_via_feishu.ipc.client import (
+    DaemonAskRetryableError,
+    DaemonTransportError,
+    SharedLongConnDaemonClient,
+)
 from ask_user_via_feishu.runtime import build_message_service
 from ask_user_via_feishu.schemas import FeishuFileType, FeishuPostContent
 
@@ -38,6 +43,23 @@ def _resolve_enabled_mcp_tools() -> set[str]:
 
 def _public_send_result() -> dict[str, Any]:
     return {"ok": True}
+
+
+def _build_retry_uuid(uuid: str | None, *, retry_stage: str) -> str | None:
+    normalized = str(uuid or "").strip() or None
+    if retry_stage != "after_send" or normalized is None:
+        return normalized
+    return f"{normalized}_retry_{uuid_lib.uuid4().hex[:8]}"
+
+
+def _local_ask_fallback_result() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "question_id": "",
+        "status": "answered",
+        "user_answer": ASK_LOCAL_FALLBACK_ANSWER,
+        "downloaded_paths": [],
+    }
 
 
 def create_server(settings: Settings) -> FastMCP:
@@ -89,17 +111,45 @@ def create_server(settings: Settings) -> FastMCP:
             raise ValueError("question must not be empty.")
         wait_options = _resolve_ask_wait_options()
         receive_id_type, receive_id = _owner_receive_target()
-        client = await _get_daemon_client()
-        return await client.ask_and_wait(
-            question=question_text,
-            choices=choices,
-            uuid=uuid,
-            receive_id_type=receive_id_type,
-            receive_id=receive_id,
-            client_id=f"{SERVER_NAME}:{os.getpid()}",
-            client_request_id=uuid or f"ask_{uuid_lib.uuid4().hex}",
-            wait_options=wait_options,
-        )
+        client_request_id = uuid or f"ask_{uuid_lib.uuid4().hex}"
+        request_uuid = str(uuid or "").strip() or None
+        retry_after_terminal_failure = False
+        for attempt in range(2):
+            try:
+                client = await _get_daemon_client()
+                return await client.ask_and_wait(
+                    question=question_text,
+                    choices=choices,
+                    uuid=request_uuid,
+                    receive_id_type=receive_id_type,
+                    receive_id=receive_id,
+                    client_id=f"{SERVER_NAME}:{os.getpid()}",
+                    client_request_id=client_request_id if attempt == 0 else f"{client_request_id}:retry{attempt}",
+                    wait_options=wait_options,
+                )
+            except DaemonAskRetryableError as exc:
+                retry_after_terminal_failure = True
+                if attempt == 0:
+                    logger.warning(
+                        "Shared daemon ask interrupted at stage=%s; retrying once on a fresh daemon.",
+                        exc.retry_stage,
+                    )
+                    request_uuid = _build_retry_uuid(request_uuid, retry_stage=exc.retry_stage)
+                    continue
+                logger.warning(
+                    "Shared daemon ask interrupted again at stage=%s; returning local ask fallback.",
+                    exc.retry_stage,
+                )
+                return _local_ask_fallback_result()
+            except (DaemonBootstrapError, DaemonTransportError) as exc:
+                if retry_after_terminal_failure:
+                    logger.warning(
+                        "Shared daemon ask retry could not reach a fresh daemon; returning local ask fallback: %s",
+                        exc,
+                    )
+                    return _local_ask_fallback_result()
+                raise
+        return _local_ask_fallback_result()
 
     mcp = FastMCP(SERVER_NAME)
 

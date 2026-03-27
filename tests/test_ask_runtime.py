@@ -11,8 +11,9 @@ from ask_user_via_feishu.ask_runtime import (
     build_wait_options,
 )
 from ask_user_via_feishu.config import Settings
-from ask_user_via_feishu.errors import MessageValidationError
-from ask_user_via_feishu.shared_longconn import PendingQuestionTimeout
+from ask_user_via_feishu.errors import MessageValidationError, RetryableAskError
+from ask_user_via_feishu.longconn import LongConnectionSetupError
+from ask_user_via_feishu.shared_longconn import PendingQuestionAborted, PendingQuestionTimeout
 
 MISSING_RUNTIME_CONFIG = "/home/yuan/code/llm/ask_user_via_feishu/tests/__no_runtime_config__.json"
 
@@ -187,6 +188,19 @@ class FakeRollbackRuntime:
         self.unregistered_question_ids.append(question_id)
 
 
+class FakeTerminalBeforeSendRuntime:
+    def ensure_started(self) -> None:
+        raise LongConnectionSetupError("ws failed")
+
+
+class FakeTerminalAfterSendRuntime(FakeRollbackRuntime):
+    def ensure_started(self) -> None:
+        return None
+
+    def wait_for_question(self, question_id: str, timeout_seconds: int):
+        raise PendingQuestionAborted("ws failed")
+
+
 class FakeTrackingRuntime(FakeAnsweredRuntime):
     def __init__(self) -> None:
         self.waiting_calls: list[dict[str, object]] = []
@@ -311,6 +325,29 @@ class AskRuntimeTest(unittest.TestCase):
         self.assertEqual(len(runtime.registered_questions), 1)
         self.assertEqual(runtime.unregistered_question_ids, [runtime.registered_questions[0]["question_id"]])
         self.assertEqual(len(fake_service.sent_interactive), 1)
+
+    def test_returns_retryable_error_before_send_when_longconn_is_terminal(self) -> None:
+        settings = self._settings()
+        fake_service = FakeTimeoutMessageService()
+
+        with self.assertRaises(RetryableAskError) as error:
+            self._run_ask(settings, fake_service, FakeTerminalBeforeSendRuntime())
+
+        self.assertEqual(error.exception.retry_stage, "before_send")
+        self.assertEqual(fake_service.sent_interactive, [])
+
+    def test_expires_sent_card_and_returns_retryable_error_when_longconn_dies_mid_wait(self) -> None:
+        settings = self._settings()
+        fake_service = FakeTimeoutMessageService()
+        runtime = FakeTerminalAfterSendRuntime()
+
+        with self.assertRaises(RetryableAskError) as error:
+            self._run_ask(settings, fake_service, runtime)
+
+        self.assertEqual(error.exception.retry_stage, "after_send")
+        self.assertEqual(len(fake_service.updated_cards), 1)
+        self.assertIn("系统会自动重新发起一次提问", fake_service.updated_cards[0]["card"]["elements"][0]["content"])
+        self.assertEqual(runtime.unregistered_question_ids, [runtime.registered_questions[0]["question_id"]])
 
     def test_returns_answer_when_card_update_fails(self) -> None:
         settings = self._settings(REACTION_ENABLED="true")

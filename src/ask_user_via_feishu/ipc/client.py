@@ -13,6 +13,14 @@ class DaemonTransportError(RuntimeError):
     """Raised when the local daemon cannot be reached over IPC."""
 
 
+class DaemonAskRetryableError(RuntimeError):
+    """Raised when the current ask should be retried on a fresh daemon."""
+
+    def __init__(self, message: str, *, retry_stage: str) -> None:
+        super().__init__(message)
+        self.retry_stage = retry_stage
+
+
 class SharedLongConnDaemonClient:
     def __init__(self, connection_info: DaemonConnectionInfo) -> None:
         self._base_url = f"http://127.0.0.1:{connection_info.metadata.port}"
@@ -27,6 +35,12 @@ class SharedLongConnDaemonClient:
         data = response.json()
         if response.status_code >= 400:
             error = str(data.get("error") or f"daemon request failed with status {response.status_code}")
+            error_code = str(data.get("error_code") or "")
+            if error_code.startswith("ask_retryable_"):
+                raise DaemonAskRetryableError(
+                    error,
+                    retry_stage=error_code.replace("ask_retryable_", "", 1) or "before_send",
+                )
             if response.status_code < 500:
                 raise ValueError(error)
             raise RuntimeError(error)

@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.event_handlers import parse_message_content
@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 class PendingQuestionTimeout(RuntimeError):
     """Raised when a shared-runtime question does not receive an answer in time."""
+
+
+class PendingQuestionAborted(RuntimeError):
+    """Raised when a shared-runtime question is aborted by terminal longconn failure."""
 
 
 @dataclass
@@ -39,16 +43,6 @@ class PendingQuestion:
                 self.result = result
             self.condition.notify_all()
 
-    def wait(self, timeout_seconds: int) -> dict[str, Any]:
-        with self.condition:
-            if self.result is None:
-                self.condition.wait(timeout_seconds)
-            if self.result is None:
-                raise PendingQuestionTimeout(
-                    f"No matching Feishu event received within {timeout_seconds} seconds."
-                )
-            return dict(self.result)
-
 
 class FeishuSharedLongConnectionRuntime:
     def __init__(
@@ -56,6 +50,8 @@ class FeishuSharedLongConnectionRuntime:
         settings: Settings,
         event_processor: FeishuEventProcessor,
         sdk: Any | None = None,
+        *,
+        on_terminal_failure: Callable[[BaseException], None] | None = None,
     ) -> None:
         self._settings = settings
         self._event_processor = event_processor
@@ -65,19 +61,19 @@ class FeishuSharedLongConnectionRuntime:
         self._pending_by_open_id: dict[str, PendingQuestion] = {}
         self._thread: threading.Thread | None = None
         self._startup_error: BaseException | None = None
+        self._on_terminal_failure = on_terminal_failure
 
     def start(self) -> None:
         with self._lock:
+            if self._startup_error is not None:
+                raise LongConnectionSetupError(str(self._startup_error)) from self._startup_error
             if self._thread is not None and self._thread.is_alive():
                 return
-            self._startup_error = None
             self._thread = threading.Thread(target=self._run_forever, daemon=True)
             self._thread.start()
             logger.info("Started shared Feishu long-connection runtime thread.")
 
     def ensure_started(self) -> None:
-        if self._startup_error is not None:
-            raise LongConnectionSetupError(str(self._startup_error)) from self._startup_error
         self.start()
 
     def register_pending_question(
@@ -132,7 +128,20 @@ class FeishuSharedLongConnectionRuntime:
             record = self._pending_by_question_id.get(question_id.strip())
         if record is None:
             raise ValueError("Pending question not found.")
-        return record.wait(timeout_seconds)
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            with record.condition:
+                if record.result is not None:
+                    return dict(record.result)
+                startup_error = self._startup_error
+                if startup_error is not None:
+                    raise PendingQuestionAborted("Shared Feishu long connection is no longer available.") from startup_error
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PendingQuestionTimeout(
+                        f"No matching Feishu event received within {timeout_seconds} seconds."
+                    )
+                record.condition.wait(min(remaining, 0.2))
 
     def unregister_pending_question(self, question_id: str) -> None:
         with self._lock:
@@ -189,6 +198,12 @@ class FeishuSharedLongConnectionRuntime:
             client.start()
         except BaseException as exc:  # noqa: BLE001
             self._startup_error = exc
+            self._notify_pending_question_updates()
+            if self._on_terminal_failure is not None:
+                try:
+                    self._on_terminal_failure(exc)
+                except Exception:  # pragma: no cover
+                    logger.exception("Shared runtime terminal-failure callback failed.")
             logger.exception("Shared Feishu long-connection runtime stopped unexpectedly: %s", exc)
         finally:
             if loop is not None and ws_client_module is not None:
@@ -205,6 +220,13 @@ class FeishuSharedLongConnectionRuntime:
                 finally:
                     ws_client_module.loop = previous_loop
                     asyncio.set_event_loop(previous_loop)
+
+    def _notify_pending_question_updates(self) -> None:
+        with self._lock:
+            records = list(self._pending_by_question_id.values())
+        for record in records:
+            with record.condition:
+                record.condition.notify_all()
 
     def _build_event_handler(self) -> Any:
         builder = self._subscriber._sdk.EventDispatcherHandler.builder("", "")
