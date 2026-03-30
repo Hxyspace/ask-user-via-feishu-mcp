@@ -1,4 +1,3 @@
-from ask_user_via_feishu.clients.feishu_auth import FeishuAuthClient
-from ask_user_via_feishu.clients.feishu_messages import FeishuMessageClient
+from ask_user_via_feishu.clients.feishu_sdk import FeishuSDKClient
 
-__all__ = ["FeishuAuthClient", "FeishuMessageClient"]
+__all__ = ["FeishuSDKClient"]

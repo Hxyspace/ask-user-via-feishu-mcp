@@ -170,6 +170,7 @@ class LongConnectionTest(unittest.TestCase):
 
         self.assertEqual(result["text"], "hello")
         self.assertEqual(result["message_id"], "om_reply")
+        self.assertEqual(runtime._pending_by_question_id["ask_123"].status, "answered")
 
     def test_shared_runtime_captures_file_reply_without_text(self) -> None:
         processor = FakeEventProcessor()

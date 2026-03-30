@@ -13,6 +13,11 @@
 
 项目基于 Python 与 `mcp[cli]` 实现，默认通过 stdio 运行，挂到 MCP Host 中使用。它支持发送文本、图片、文件、Feishu post 富文本消息，也支持通过共享的飞书长连接在后台等待 owner 的文本回复、卡片按钮选择，或图片/文件资源回传。
 
+> 迁移说明（Phase 1）
+>
+> 当前版本已经把消息发送链路统一到 `lark_oapi`：共享长连接和 send/upload/download/update/reaction 都走 Feishu SDK。
+> MCP 工具层的输入输出契约保持不变；如果你在仓库内部直接引用过旧的 `clients.feishu_auth`、`clients.feishu_messages` 或 `services.token_manager`，现在应改为使用 `clients.feishu_sdk.FeishuSDKClient`，或更高层的 `runtime.build_message_service()`。
+
 ## 🚀 主要特性
 
 - **owner-only 模式**：只接受配置的 `OWNER_OPEN_ID` 对应用户事件，避免多人混用。
@@ -20,7 +25,7 @@
 - **双向交互**：既能主动发消息，也能等待飞书侧用户回复。
 - **共享长连接运行时**：`ask_user_via_feishu` 使用共享长连接监听飞书事件，避免每次提问都单独建立事件通道。
 - **卡片按钮选择**：提问时可附带选项，飞书侧会渲染交互卡片按钮。
-- **资源回传下载**：用户如果回复图片或文件，服务会自动下载到共享 daemon runtime 目录下的 `attachments/YYYY-MM-DD/` 目录，并在返回结果中给出本地路径。
+- **资源回传下载**：用户如果回复图片或文件，服务会以流式写盘方式下载到共享 daemon runtime 目录下的 `attachments/YYYY-MM-DD/` 目录，并在返回结果中给出本地路径。
 - **超时提醒与默认答案**：支持提醒重试、默认答案，以及 `[AUTO_RECALL]` 自动召回模式。
 
 ## 🎯 适用场景
@@ -173,7 +178,7 @@ python -m ask_user_via_feishu
 | `OWNER_OPEN_ID` | 是 | - | 允许交互的唯一 owner |
 | `LOG_LEVEL` | 否 | `INFO` | 日志级别 |
 | `BASE_URL` | 否 | `https://open.feishu.cn` | 飞书开放平台地址 |
-| `API_TIMEOUT_SECONDS` | 否 | `10` | HTTP 请求超时时间 |
+| `API_TIMEOUT_SECONDS` | 否 | `10` | Feishu SDK / API 请求超时时间 |
 | `RUNTIME_CONFIG_PATH` | 否 | 空 | 运行时 JSON 配置文件路径 |
 | `REACTION_ENABLED` | 否 | `true` | 是否为回复消息添加处理中 reaction |
 | `REACTION_EMOJI_TYPE` | 否 | `Typing` | 处理中 reaction 类型 |
@@ -223,7 +228,7 @@ python -m ask_user_via_feishu
 - 向 owner 发送问题卡片；
 - 可选附带按钮选项；
 - 后台等待 owner 的下一条私聊回复或卡片按钮操作；
-- 如果回复包含图片/文件，会自动下载到本地；
+- 如果回复包含图片/文件，会以流式方式自动下载到共享 daemon runtime 目录；
 - 返回结构中包含 `status`、`user_answer`、`downloaded_paths`。
 
 超时行为：
@@ -237,7 +242,7 @@ python -m ask_user_via_feishu
 
 当用户只发送图片或文件、没有文本时：
 
-- 服务会下载资源到共享 daemon runtime 目录下的 `attachments/YYYY-MM-DD/`
+- 服务会把资源流式下载到共享 daemon runtime 目录下的 `attachments/YYYY-MM-DD/`
 - `ask_user_via_feishu` 会返回这些本地路径
 - 若同一天内文件名冲突，会自动追加 fallback 名称避免覆盖
 - 同时返回一段提示文本，指导上层 LLM 基于这些文件继续发起下一轮问题
@@ -276,6 +281,9 @@ python -m build
 │   └── mcpServers.ask-user-via-feishu.json
 ├── src/ask_user_via_feishu/
 │   ├── clients/
+│   │   └── feishu_sdk.py
+│   ├── daemon/
+│   ├── ipc/
 │   ├── services/
 │   ├── config.py
 │   ├── longconn.py

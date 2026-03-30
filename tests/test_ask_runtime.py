@@ -215,6 +215,12 @@ class FakeFailingSendMessageService(FakeTimeoutMessageService):
         raise MessageValidationError("send failed")
 
 
+class FakeFailingReminderMessageService(FakeTimeoutMessageService):
+    async def send_text(self, **kwargs):
+        self.sent_texts.append(kwargs)
+        raise MessageValidationError("reminder failed")
+
+
 class AskRuntimeTest(unittest.TestCase):
     def _settings(self, **overrides: str) -> Settings:
         env = {
@@ -251,6 +257,21 @@ class AskRuntimeTest(unittest.TestCase):
             ASK_TIMEOUT_DEFAULT_ANSWER="[AUTO_RECALL]",
         )
         fake_service = FakeTimeoutMessageService()
+
+        result = self._run_ask(settings, fake_service, FakeTimeoutRuntime())
+
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(result["user_answer"], ASK_AUTO_RECALL_ANSWER)
+        self.assertEqual(len(fake_service.sent_texts), 1)
+        self.assertEqual(len(fake_service.updated_cards), 1)
+
+    def test_timeout_reminder_failure_does_not_abort_ask(self) -> None:
+        settings = self._settings(
+            ASK_REMINDER_MAX_ATTEMPTS="1",
+            ASK_TIMEOUT_REMINDER_TEXT="请尽快回复",
+            ASK_TIMEOUT_DEFAULT_ANSWER="[AUTO_RECALL]",
+        )
+        fake_service = FakeFailingReminderMessageService()
 
         result = self._run_ask(settings, fake_service, FakeTimeoutRuntime())
 

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from ask_user_via_feishu.clients.feishu_messages import FeishuMessageClient
 from ask_user_via_feishu.config import SERVER_NAME, SERVER_VERSION, Settings
 from ask_user_via_feishu.errors import MessageValidationError
 from ask_user_via_feishu.schemas import (
@@ -17,22 +17,19 @@ from ask_user_via_feishu.schemas import (
     FeishuPostContent,
     ReceiveIdType,
 )
-from ask_user_via_feishu.services.token_manager import TokenManager
 
 
 class MessageService:
     def __init__(
         self,
-        message_client: FeishuMessageClient,
-        token_manager: TokenManager,
+        message_client: Any,
         settings: Settings,
     ) -> None:
         self._message_client = message_client
-        self._token_manager = token_manager
         self._settings = settings
 
     async def health_check(self) -> dict[str, Any]:
-        await self._token_manager.get_token()
+        await self._message_client.health_check()
         return {
             "ok": True,
             "service": SERVER_NAME,
@@ -52,10 +49,8 @@ class MessageService:
         resolved_receive_id_type, resolved_receive_id = self._resolve_receive_target(receive_id_type, receive_id)
         if not text.strip():
             raise MessageValidationError("text must not be empty.")
-        token = await self._token_manager.get_token()
         content = json.dumps({"zh_cn": {"content": [[{"tag": "md", "text": text}]]}}, ensure_ascii=False)
         response = await self._message_client.send_message(
-            token,
             receive_id_type=resolved_receive_id_type,
             receive_id=resolved_receive_id,
             msg_type="post",
@@ -67,8 +62,7 @@ class MessageService:
     async def upload_image(self, *, image_path: str) -> dict[str, Any]:
         if not image_path.strip():
             raise MessageValidationError("image_path must not be empty.")
-        token = await self._token_manager.get_token()
-        response = await self._message_client.upload_image(token, image_path=image_path)
+        response = await self._message_client.upload_image(image_path=image_path)
         data = response.get("data") or {}
         image_key = str(data.get("image_key") or "").strip()
         if not image_key:
@@ -92,9 +86,7 @@ class MessageService:
             raise MessageValidationError("image_path must not be empty.")
         upload_result = await self.upload_image(image_path=image_path)
         resolved_image_key = str(upload_result.get("image_key") or "").strip()
-        token = await self._token_manager.get_token()
         response = await self._message_client.send_message(
-            token,
             receive_id_type=resolved_receive_id_type,
             receive_id=resolved_receive_id,
             msg_type="image",
@@ -126,9 +118,7 @@ class MessageService:
             )
         if duration_ms is not None and duration_ms < 0:
             raise MessageValidationError("duration_ms must be greater than or equal to 0.")
-        token = await self._token_manager.get_token()
         response = await self._message_client.upload_file(
-            token,
             file_path=file_path,
             file_type=resolved_file_type,
             file_name=resolved_file_name,
@@ -167,9 +157,7 @@ class MessageService:
             duration_ms=duration_ms,
         )
         resolved_file_key = str(upload_result.get("file_key") or "").strip()
-        token = await self._token_manager.get_token()
         response = await self._message_client.send_message(
-            token,
             receive_id_type=resolved_receive_id_type,
             receive_id=resolved_receive_id,
             msg_type="file",
@@ -195,9 +183,7 @@ class MessageService:
         validated_content = self._validate_post_content(content)
         if not locale.strip():
             raise MessageValidationError("locale must not be empty.")
-        token = await self._token_manager.get_token()
         response = await self._message_client.send_message(
-            token,
             receive_id_type=resolved_receive_id_type,
             receive_id=resolved_receive_id,
             msg_type="post",
@@ -218,9 +204,7 @@ class MessageService:
         resolved_receive_id_type, resolved_receive_id = self._resolve_receive_target(receive_id_type, receive_id)
         if not isinstance(card, dict) or not card:
             raise MessageValidationError("card must be a non-empty JSON object.")
-        token = await self._token_manager.get_token()
         response = await self._message_client.send_message(
-            token,
             receive_id_type=resolved_receive_id_type,
             receive_id=resolved_receive_id,
             msg_type="interactive",
@@ -234,8 +218,7 @@ class MessageService:
             raise MessageValidationError("message_id must not be empty.")
         if not isinstance(card, dict) or not card:
             raise MessageValidationError("card must be a non-empty JSON object.")
-        token = await self._token_manager.get_token()
-        response = await self._message_client.update_message_card(token, message_id=message_id, card=card)
+        response = await self._message_client.update_message_card(message_id=message_id, card=card)
         return {
             "ok": True,
             "message_id": message_id,
@@ -254,9 +237,7 @@ class MessageService:
         resolved_emoji_type = (emoji_type or self._settings.reaction_emoji_type).strip()
         if not resolved_emoji_type:
             raise MessageValidationError("emoji_type must not be empty.")
-        token = await self._token_manager.get_token()
         created = await self._message_client.create_message_reaction(
-            token,
             message_id=message_id,
             emoji_type=resolved_emoji_type,
         )
@@ -276,9 +257,7 @@ class MessageService:
             raise MessageValidationError("message_id must not be empty.")
         if not reaction_id.strip():
             raise MessageValidationError("reaction_id must not be empty.")
-        token = await self._token_manager.get_token()
         deleted = await self._message_client.delete_message_reaction(
-            token,
             message_id=message_id,
             reaction_id=reaction_id,
         )
@@ -305,7 +284,6 @@ class MessageService:
             raise MessageValidationError("target_root must not be empty.")
         target_dir = (target_root.expanduser().resolve() / self._download_bucket_name()).resolve()
         target_dir.mkdir(parents=True, exist_ok=True)
-        token = await self._token_manager.get_token()
         saved_paths: list[str] = []
         seen: set[tuple[str, str]] = set()
         for resource_ref in resource_refs:
@@ -319,7 +297,6 @@ class MessageService:
                     continue
                 seen.add((kind, image_key))
                 download = await self._message_client.download_message_resource(
-                    token,
                     message_id=message_id,
                     file_key=image_key,
                     resource_type="image",
@@ -330,7 +307,7 @@ class MessageService:
                     suggested_name="",
                     content_type=str(download.get("content_type") or ""),
                 )
-                target_path.write_bytes(download.get("content") or b"")
+                self._write_download_payload(target_path=target_path, download=download)
                 saved_paths.append(str(target_path))
                 continue
             if kind == "file":
@@ -339,7 +316,6 @@ class MessageService:
                     continue
                 seen.add((kind, file_key))
                 download = await self._message_client.download_message_resource(
-                    token,
                     message_id=message_id,
                     file_key=file_key,
                     resource_type="file",
@@ -353,7 +329,7 @@ class MessageService:
                     suggested_name=suggested_name,
                     content_type=str(download.get("content_type") or ""),
                 )
-                target_path.write_bytes(download.get("content") or b"")
+                self._write_download_payload(target_path=target_path, download=download)
                 saved_paths.append(str(target_path))
         return saved_paths
 
@@ -500,6 +476,37 @@ class MessageService:
         return ""
 
     @staticmethod
+    def _write_download_payload(*, target_path: Path, download: dict[str, Any]) -> None:
+        content_stream = download.get("content_stream")
+        if content_stream is not None:
+            MessageService._write_download_stream(target_path=target_path, content_stream=content_stream)
+            return
+        if "content" not in download:
+            raise MessageValidationError("Downloaded message resource did not include file content.")
+        content = download.get("content")
+        if content is None:
+            content_bytes = b""
+        elif isinstance(content, bytes):
+            content_bytes = content
+        elif isinstance(content, bytearray):
+            content_bytes = bytes(content)
+        elif isinstance(content, memoryview):
+            content_bytes = content.tobytes()
+        else:
+            raise MessageValidationError("Downloaded message resource content must be bytes.")
+        target_path.write_bytes(content_bytes)
+
+    @staticmethod
+    def _write_download_stream(*, target_path: Path, content_stream: Any) -> None:
+        try:
+            with target_path.open("wb") as target_file:
+                shutil.copyfileobj(content_stream, target_file, length=1024 * 1024)
+        finally:
+            close = getattr(content_stream, "close", None)
+            if callable(close):
+                close()
+
+    @staticmethod
     def _normalize_result(
         response: dict[str, Any],
         receive_id: str,
@@ -521,10 +528,4 @@ class MessageService:
         timestamp = int(normalized)
         if timestamp <= 0:
             return 0
-        if timestamp < 10_000_000_000:
-            return timestamp * 1000
-        if timestamp < 10_000_000_000_000:
-            return timestamp
-        if timestamp < 10_000_000_000_000_000:
-            return timestamp // 1000
-        return timestamp // 1_000_000
+        return timestamp

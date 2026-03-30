@@ -281,11 +281,19 @@ class AskRuntimeOrchestrator:
         timeout_attempt: int,
     ) -> dict[str, Any]:
         if wait_options.timeout_reminder_text and timeout_attempt <= wait_options.reminder_max_attempts:
-            await self._service.send_text(
-                receive_id_type="open_id",
-                receive_id=target_open_id,
-                text=wait_options.timeout_reminder_text,
-            )
+            try:
+                await self._service.send_text(
+                    receive_id_type="open_id",
+                    receive_id=target_open_id,
+                    text=wait_options.timeout_reminder_text,
+                )
+            except (FeishuAPIError, MessageValidationError) as exc:
+                logger.warning(
+                    "Failed to send timeout reminder question_id=%s attempt=%s: %s",
+                    question_id,
+                    timeout_attempt,
+                    exc,
+                )
 
         reminder_limit_reached = timeout_attempt > wait_options.reminder_max_attempts
         if question_message_id and reminder_limit_reached:

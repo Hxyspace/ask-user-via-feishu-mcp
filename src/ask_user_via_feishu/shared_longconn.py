@@ -41,6 +41,7 @@ class PendingQuestion:
         with self.condition:
             if self.result is None:
                 self.result = result
+                self.status = "answered"
             self.condition.notify_all()
 
 
@@ -423,10 +424,4 @@ def _parse_event_timestamp_ms(value: Any) -> int | None:
     timestamp = int(normalized)
     if timestamp <= 0:
         return None
-    if timestamp < 10_000_000_000:
-        return timestamp * 1000
-    if timestamp < 10_000_000_000_000:
-        return timestamp
-    if timestamp < 10_000_000_000_000_000:
-        return timestamp // 1000
-    return timestamp // 1_000_000
+    return timestamp

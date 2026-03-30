@@ -100,6 +100,28 @@ def create_server(settings: Settings) -> FastMCP:
             )
         await local_call()
 
+    async def _send_owner_message(
+        *,
+        operation_name: str,
+        log_message: str,
+        daemon_method_name: str,
+        local_method_name: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        logger.info(log_message)
+        receive_id_type, receive_id = _owner_receive_target()
+        resolved_payload = {
+            **payload,
+            "receive_id_type": receive_id_type,
+            "receive_id": receive_id,
+        }
+        await _send_via_daemon_with_fallback(
+            operation_name=operation_name,
+            daemon_call=lambda client: getattr(client, daemon_method_name)(**resolved_payload),
+            local_call=lambda: getattr(service, local_method_name)(**resolved_payload),
+        )
+        return _public_send_result()
+
     async def _ask_user_via_feishu_daemon_impl(
         *,
         question: str,
@@ -161,24 +183,16 @@ def create_server(settings: Settings) -> FastMCP:
             uuid: str | None = None,
         ) -> dict[str, Any]:
             """Send a text message to the configured owner."""
-            logger.info("Sending text message to configured owner")
-            receive_id_type, receive_id = _owner_receive_target()
-            await _send_via_daemon_with_fallback(
+            return await _send_owner_message(
                 operation_name="send_text_message",
-                daemon_call=lambda client: client.send_text_message(
-                    text=text,
-                    uuid=uuid,
-                    receive_id_type=receive_id_type,
-                    receive_id=receive_id,
-                ),
-                local_call=lambda: service.send_text(
-                    receive_id_type=receive_id_type,
-                    receive_id=receive_id,
-                    text=text,
-                    uuid=uuid,
-                ),
+                log_message="Sending text message to configured owner",
+                daemon_method_name="send_text_message",
+                local_method_name="send_text",
+                payload={
+                    "text": text,
+                    "uuid": uuid,
+                },
             )
-            return _public_send_result()
 
     if tool_enabled("send_image_message"):
 
@@ -188,24 +202,16 @@ def create_server(settings: Settings) -> FastMCP:
             uuid: str | None = None,
         ) -> dict[str, Any]:
             """Send an image message to the configured owner."""
-            logger.info("Sending image message to configured owner")
-            receive_id_type, receive_id = _owner_receive_target()
-            await _send_via_daemon_with_fallback(
+            return await _send_owner_message(
                 operation_name="send_image_message",
-                daemon_call=lambda client: client.send_image_message(
-                    image_path=image_path,
-                    uuid=uuid,
-                    receive_id_type=receive_id_type,
-                    receive_id=receive_id,
-                ),
-                local_call=lambda: service.send_image(
-                    receive_id_type=receive_id_type,
-                    receive_id=receive_id,
-                    image_path=image_path,
-                    uuid=uuid,
-                ),
+                log_message="Sending image message to configured owner",
+                daemon_method_name="send_image_message",
+                local_method_name="send_image",
+                payload={
+                    "image_path": image_path,
+                    "uuid": uuid,
+                },
             )
-            return _public_send_result()
 
     if tool_enabled("send_file_message"):
 
@@ -218,30 +224,19 @@ def create_server(settings: Settings) -> FastMCP:
             uuid: str | None = None,
         ) -> dict[str, Any]:
             """Send a file message to the configured owner. `file_type` must be one of opus, mp4, pdf, doc, xls, ppt, stream; use `stream` for other file types."""
-            logger.info("Sending file message to configured owner")
-            receive_id_type, receive_id = _owner_receive_target()
-            await _send_via_daemon_with_fallback(
+            return await _send_owner_message(
                 operation_name="send_file_message",
-                daemon_call=lambda client: client.send_file_message(
-                    file_path=file_path,
-                    file_type=file_type,
-                    file_name=file_name,
-                    duration_ms=duration_ms,
-                    uuid=uuid,
-                    receive_id_type=receive_id_type,
-                    receive_id=receive_id,
-                ),
-                local_call=lambda: service.send_file(
-                    receive_id_type=receive_id_type,
-                    receive_id=receive_id,
-                    file_path=file_path,
-                    file_type=file_type,
-                    file_name=file_name,
-                    duration_ms=duration_ms,
-                    uuid=uuid,
-                ),
+                log_message="Sending file message to configured owner",
+                daemon_method_name="send_file_message",
+                local_method_name="send_file",
+                payload={
+                    "file_path": file_path,
+                    "file_type": file_type,
+                    "file_name": file_name,
+                    "duration_ms": duration_ms,
+                    "uuid": uuid,
+                },
             )
-            return _public_send_result()
 
     if tool_enabled("send_post_message"):
 
@@ -253,28 +248,18 @@ def create_server(settings: Settings) -> FastMCP:
             uuid: str | None = None,
         ) -> dict[str, Any]:
             """Send a Feishu post rich-text message using official text, a, at, img, media, emotion, hr, code_block, or md nodes."""
-            logger.info("Sending post message to configured owner")
-            receive_id_type, receive_id = _owner_receive_target()
-            await _send_via_daemon_with_fallback(
+            return await _send_owner_message(
                 operation_name="send_post_message",
-                daemon_call=lambda client: client.send_post_message(
-                    title=title,
-                    content=content,
-                    locale=locale,
-                    uuid=uuid,
-                    receive_id_type=receive_id_type,
-                    receive_id=receive_id,
-                ),
-                local_call=lambda: service.send_post(
-                    receive_id_type=receive_id_type,
-                    receive_id=receive_id,
-                    title=title,
-                    content=content,
-                    locale=locale,
-                    uuid=uuid,
-                ),
+                log_message="Sending post message to configured owner",
+                daemon_method_name="send_post_message",
+                local_method_name="send_post",
+                payload={
+                    "title": title,
+                    "content": content,
+                    "locale": locale,
+                    "uuid": uuid,
+                },
             )
-            return _public_send_result()
 
     if tool_enabled("ask_user_via_feishu"):
 

@@ -30,6 +30,13 @@ class DaemonServerTest(unittest.TestCase):
                 urlopen(f"http://127.0.0.1:{daemon.metadata.port}/v1/health", timeout=1)
             self.assertEqual(health_error.exception.code, 401)
 
+            with self.assertRaises(HTTPError) as wrong_token_error:
+                self._fetch_json(
+                    f"http://127.0.0.1:{daemon.metadata.port}/v1/health",
+                    token=f"{daemon.token[:-1]}x",
+                )
+            self.assertEqual(wrong_token_error.exception.code, 401)
+
             health = self._fetch_json(
                 f"http://127.0.0.1:{daemon.metadata.port}/v1/health",
                 token=daemon.token,

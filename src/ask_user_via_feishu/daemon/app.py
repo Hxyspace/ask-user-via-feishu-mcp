@@ -96,53 +96,52 @@ class SharedLongConnDaemonApp:
             "pending_question_id": self._shared_runtime.current_pending_question_id(),
         }
 
+    @staticmethod
+    def _common_send_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "receive_id_type": str(payload.get("receive_id_type") or "open_id"),
+            "receive_id": str(payload.get("receive_id") or ""),
+            "uuid": str(payload.get("uuid") or "") or None,
+        }
+
+    def _run_message_service(self, method_name: str, **kwargs: Any) -> dict[str, Any]:
+        return asyncio.run(getattr(self._message_service, method_name)(**kwargs))
+
     def _send_text_message(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return asyncio.run(
-            self._message_service.send_text(
-                receive_id_type=str(payload.get("receive_id_type") or "open_id"),
-                receive_id=str(payload.get("receive_id") or ""),
-                text=str(payload.get("text") or ""),
-                uuid=str(payload.get("uuid") or "") or None,
-            )
+        return self._run_message_service(
+            "send_text",
+            **self._common_send_kwargs(payload),
+            text=str(payload.get("text") or ""),
         )
 
     def _send_image_message(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return asyncio.run(
-            self._message_service.send_image(
-                receive_id_type=str(payload.get("receive_id_type") or "open_id"),
-                receive_id=str(payload.get("receive_id") or ""),
-                image_path=str(payload.get("image_path") or ""),
-                uuid=str(payload.get("uuid") or "") or None,
-            )
+        return self._run_message_service(
+            "send_image",
+            **self._common_send_kwargs(payload),
+            image_path=str(payload.get("image_path") or ""),
         )
 
     def _send_file_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         duration_value = payload.get("duration_ms")
-        return asyncio.run(
-            self._message_service.send_file(
-                receive_id_type=str(payload.get("receive_id_type") or "open_id"),
-                receive_id=str(payload.get("receive_id") or ""),
-                file_path=str(payload.get("file_path") or ""),
-                file_type=str(payload.get("file_type") or "stream"),
-                file_name=str(payload.get("file_name") or "") or None,
-                duration_ms=int(duration_value) if duration_value is not None else None,
-                uuid=str(payload.get("uuid") or "") or None,
-            )
+        return self._run_message_service(
+            "send_file",
+            **self._common_send_kwargs(payload),
+            file_path=str(payload.get("file_path") or ""),
+            file_type=str(payload.get("file_type") or "stream"),
+            file_name=str(payload.get("file_name") or "") or None,
+            duration_ms=int(duration_value) if duration_value is not None else None,
         )
 
     def _send_post_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         content_value = payload.get("content")
         if not isinstance(content_value, list):
             raise ValueError("content must be a JSON array when provided.")
-        return asyncio.run(
-            self._message_service.send_post(
-                receive_id_type=str(payload.get("receive_id_type") or "open_id"),
-                receive_id=str(payload.get("receive_id") or ""),
-                title=str(payload.get("title") or ""),
-                content=content_value,
-                locale=str(payload.get("locale") or "zh_cn"),
-                uuid=str(payload.get("uuid") or "") or None,
-            )
+        return self._run_message_service(
+            "send_post",
+            **self._common_send_kwargs(payload),
+            title=str(payload.get("title") or ""),
+            content=content_value,
+            locale=str(payload.get("locale") or "zh_cn"),
         )
 
     def _ensure_accepting_asks(self) -> None:

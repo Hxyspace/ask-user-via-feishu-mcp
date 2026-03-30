@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -233,7 +234,8 @@ class SharedLongConnDaemonServer:
 
     def _is_authorized(self, handler: BaseHTTPRequestHandler) -> bool:
         authorization = str(handler.headers.get("Authorization") or "").strip()
-        return authorization == f"Bearer {self._token}"
+        expected = f"Bearer {self._token}"
+        return bool(authorization) and secrets.compare_digest(authorization, expected)
 
     def _send_json(
         self,

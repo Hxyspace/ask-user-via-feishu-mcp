@@ -2,76 +2,65 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import io
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
-from ask_user_via_feishu.config import Settings
+from ask_user_via_feishu.config import SERVER_NAME, SERVER_VERSION, Settings
 from ask_user_via_feishu.errors import MessageValidationError
 from ask_user_via_feishu.schemas import FeishuPostContent
-from ask_user_via_feishu.services import TokenManager
 from ask_user_via_feishu.services.message_service import MessageService
 
 MISSING_RUNTIME_CONFIG = "/home/yuan/code/llm/ask_user_via_feishu/tests/__no_runtime_config__.json"
 
 
-class FakeTokenManager:
-    async def get_token(self) -> str:
-        return "tenant_token"
-
-
-class FakeAuthClient:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def get_tenant_access_token(self, app_id: str, app_secret: str) -> tuple[str, int]:
-        self.calls += 1
-        return (f"tenant_token_{self.calls}", 7200)
-
-
 class FakeMessageClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.health_checks = 0
 
-    async def send_message(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(("send_message", {"access_token": access_token, **kwargs}))
+    async def health_check(self) -> None:
+        self.health_checks += 1
+
+    async def send_message(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("send_message", kwargs))
         return {"code": 0, "data": {"message_id": "om_123", "chat_id": "oc_p2p", "create_time": "1234567890123"}}
 
-    async def upload_image(self, access_token: str, *, image_path: str) -> dict[str, Any]:
-        self.calls.append(("upload_image", {"access_token": access_token, "image_path": image_path}))
+    async def upload_image(self, *, image_path: str) -> dict[str, Any]:
+        self.calls.append(("upload_image", {"image_path": image_path}))
         return {"code": 0, "data": {"image_key": "img_123"}}
 
-    async def upload_file(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(("upload_file", {"access_token": access_token, **kwargs}))
+    async def upload_file(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("upload_file", kwargs))
         return {"code": 0, "data": {"file_key": "file_123"}}
 
-    async def update_message_card(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(("update_message_card", {"access_token": access_token, **kwargs}))
+    async def update_message_card(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("update_message_card", kwargs))
         return {"code": 0, "data": {"message_id": kwargs["message_id"]}}
 
-    async def download_message_resource(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(("download_message_resource", {"access_token": access_token, **kwargs}))
+    async def download_message_resource(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("download_message_resource", kwargs))
         if kwargs["resource_type"] == "image":
             return {
-                "content": b"image-bytes",
+                "content_stream": io.BytesIO(b"image-bytes"),
                 "content_type": "image/png",
                 "content_disposition": "",
             }
         return {
-            "content": b"file-bytes",
+            "content_stream": io.BytesIO(b"file-bytes"),
             "content_type": "application/pdf",
             "content_disposition": 'attachment; filename="downloaded.pdf"',
         }
 
-    async def create_message_reaction(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(("create_message_reaction", {"access_token": access_token, **kwargs}))
+    async def create_message_reaction(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("create_message_reaction", kwargs))
         return {"code": 0, "data": {"reaction_id": "react_123"}}
 
-    async def delete_message_reaction(self, access_token: str, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(("delete_message_reaction", {"access_token": access_token, **kwargs}))
+    async def delete_message_reaction(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("delete_message_reaction", kwargs))
         return {"code": 0, "data": {}}
 
 
@@ -86,9 +75,27 @@ class MessageServiceTest(unittest.TestCase):
             }
         )
 
+    def test_health_check_returns_metadata(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, self._settings())
+
+        result = asyncio.run(service.health_check())
+
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "service": SERVER_NAME,
+                "version": SERVER_VERSION,
+                "auth_configured": True,
+                "token_fetch_ok": True,
+            },
+        )
+        self.assertEqual(client.health_checks, 1)
+
     def test_send_text_uses_owner_as_default_target(self) -> None:
         client = FakeMessageClient()
-        service = MessageService(client, FakeTokenManager(), self._settings())
+        service = MessageService(client, self._settings())
 
         result = asyncio.run(service.send_text(receive_id_type="open_id", receive_id="", text="hello"))
 
@@ -107,12 +114,12 @@ class MessageServiceTest(unittest.TestCase):
         self.assertEqual(client.calls[0][1]["msg_type"], "post")
         self.assertEqual(
             json.loads(client.calls[0][1]["content"]),
-            {"zh_cn": {"content": [[{"tag": "md", "text": "hello", }]]}},
+            {"zh_cn": {"content": [[{"tag": "md", "text": "hello"}]]}},
         )
 
-    def test_send_image_rejects_path_and_key_together(self) -> None:
+    def test_send_image_rejects_empty_path(self) -> None:
         client = FakeMessageClient()
-        service = MessageService(client, FakeTokenManager(), self._settings())
+        service = MessageService(client, self._settings())
 
         with self.assertRaises(MessageValidationError):
             asyncio.run(
@@ -125,7 +132,7 @@ class MessageServiceTest(unittest.TestCase):
 
     def test_send_file_rejects_unsupported_file_type(self) -> None:
         client = FakeMessageClient()
-        service = MessageService(client, FakeTokenManager(), self._settings())
+        service = MessageService(client, self._settings())
 
         with self.assertRaises(MessageValidationError):
             asyncio.run(
@@ -138,7 +145,7 @@ class MessageServiceTest(unittest.TestCase):
     def test_create_and_delete_reaction(self) -> None:
         client = FakeMessageClient()
         settings = self._settings()
-        service = MessageService(client, FakeTokenManager(), settings)
+        service = MessageService(client, settings)
 
         created = asyncio.run(service.create_reaction(message_id="om_123"))
         deleted = asyncio.run(service.delete_reaction(message_id="om_123", reaction_id="react_123"))
@@ -149,7 +156,7 @@ class MessageServiceTest(unittest.TestCase):
 
     def test_send_post_accepts_supported_elements(self) -> None:
         client = FakeMessageClient()
-        service = MessageService(client, FakeTokenManager(), self._settings())
+        service = MessageService(client, self._settings())
         content: FeishuPostContent = [
             [{"tag": "text", "text": "文档："}, {"tag": "a", "text": "README", "href": "https://example.com"}],
             [{"tag": "at", "user_id": "ou_owner"}],
@@ -188,7 +195,7 @@ class MessageServiceTest(unittest.TestCase):
 
     def test_send_post_rejects_unknown_tag(self) -> None:
         client = FakeMessageClient()
-        service = MessageService(client, FakeTokenManager(), self._settings())
+        service = MessageService(client, self._settings())
 
         with self.assertRaises(MessageValidationError):
             asyncio.run(
@@ -202,7 +209,7 @@ class MessageServiceTest(unittest.TestCase):
 
     def test_send_post_rejects_media_without_file_key(self) -> None:
         client = FakeMessageClient()
-        service = MessageService(client, FakeTokenManager(), self._settings())
+        service = MessageService(client, self._settings())
 
         with self.assertRaises(MessageValidationError):
             asyncio.run(
@@ -216,7 +223,7 @@ class MessageServiceTest(unittest.TestCase):
 
     def test_send_post_rejects_markdown_mixed_with_other_elements(self) -> None:
         client = FakeMessageClient()
-        service = MessageService(client, FakeTokenManager(), self._settings())
+        service = MessageService(client, self._settings())
 
         with self.assertRaises(MessageValidationError):
             asyncio.run(
@@ -235,12 +242,10 @@ class MessageServiceTest(unittest.TestCase):
 
     def test_send_post_can_run_after_send_text_on_a_different_event_loop(self) -> None:
         client = FakeMessageClient()
-        auth_client = FakeAuthClient()
-        service = MessageService(client, TokenManager(auth_client, self._settings()), self._settings())
+        service = MessageService(client, self._settings())
         content: FeishuPostContent = [[{"tag": "text", "text": "hello"}]]
 
         first = asyncio.run(service.send_text(receive_id_type="open_id", receive_id="", text="first"))
-        service._token_manager._expires_at = 0.0  # force token refresh through a new loop
         second = asyncio.run(
             service.send_post(
                 receive_id_type="open_id",
@@ -252,11 +257,11 @@ class MessageServiceTest(unittest.TestCase):
 
         self.assertEqual(first["message_id"], "om_123")
         self.assertEqual(second["message_id"], "om_123")
-        self.assertEqual(auth_client.calls, 2)
+        self.assertEqual([name for name, _ in client.calls], ["send_message", "send_message"])
 
-    def test_download_reply_resources_saves_files_under_receive_files(self) -> None:
+    def test_download_reply_resources_saves_files_under_attachments_bucket(self) -> None:
         client = FakeMessageClient()
-        service = MessageService(client, FakeTokenManager(), self._settings())
+        service = MessageService(client, self._settings())
         expected_bucket = datetime.now().strftime("%Y-%m-%d")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -285,7 +290,7 @@ class MessageServiceTest(unittest.TestCase):
 
     def test_download_reply_resources_uses_fallback_name_for_same_day_collision(self) -> None:
         client = FakeMessageClient()
-        service = MessageService(client, FakeTokenManager(), self._settings())
+        service = MessageService(client, self._settings())
         expected_bucket = datetime.now().strftime("%Y-%m-%d")
 
         with tempfile.TemporaryDirectory() as tmpdir:
