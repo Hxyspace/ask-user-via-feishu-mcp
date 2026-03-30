@@ -154,16 +154,20 @@ class AskRuntimeOrchestrator:
         receive_id_type: str,
         receive_id: str,
         wait_options: AskWaitOptions,
+        allowed_actor_open_id: str | None = None,
+        question_id: str | None = None,
+        card: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         question_text = question.strip()
         if not question_text:
             raise ValueError("question must not be empty.")
         resolved_receive_id_type = (receive_id_type or "open_id").strip() or "open_id"
-        target_open_id = receive_id.strip()
-        if resolved_receive_id_type != "open_id":
-            raise ValueError("ask_user_via_feishu currently only supports open_id receive targets.")
-        if not target_open_id:
+        resolved_receive_id = receive_id.strip()
+        if not resolved_receive_id:
             raise ValueError("receive_id must not be empty.")
+        target_open_id = (allowed_actor_open_id or self._settings.owner_open_id).strip()
+        if not target_open_id:
+            raise ValueError("allowed_actor_open_id must not be empty.")
         try:
             self._shared_runtime.ensure_started()
         except LongConnectionSetupError as exc:
@@ -172,11 +176,22 @@ class AskRuntimeOrchestrator:
                 retry_stage="before_send",
             ) from exc
         await self._best_effort_clear_processing_reaction()
-        question_id = f"ask_{uuid_lib.uuid4().hex[:8]}"
+        resolved_question_id = str(question_id or f"ask_{uuid_lib.uuid4().hex[:8]}").strip()
+        if not resolved_question_id:
+            raise ValueError("question_id must not be empty.")
         normalized_choices = [choice.strip() for choice in (choices or []) if choice and choice.strip()]
+        resolved_card = card
+        if resolved_card is None:
+            resolved_card = build_ask_user_options_card(
+                question_id=resolved_question_id,
+                question=question_text,
+                choices=normalized_choices,
+            )
+        if not isinstance(resolved_card, dict) or not resolved_card:
+            raise ValueError("card must be a non-empty JSON object.")
         question_message_id = ""
         self._shared_runtime.register_pending_question(
-            question_id=question_id,
+            question_id=resolved_question_id,
             target_open_id=target_open_id,
             question=question_text,
             question_message_id=question_message_id,
@@ -184,18 +199,14 @@ class AskRuntimeOrchestrator:
         try:
             send_result = await self._service.send_interactive(
                 receive_id_type=resolved_receive_id_type,
-                receive_id=target_open_id,
-                card=build_ask_user_options_card(
-                    question_id=question_id,
-                    question=question_text,
-                    choices=normalized_choices,
-                ),
+                receive_id=resolved_receive_id,
+                card=resolved_card,
                 uuid=uuid,
             )
-            target_open_id = str(send_result.get("receive_id") or target_open_id)
+            resolved_receive_id = str(send_result.get("receive_id") or resolved_receive_id)
             question_message_id = str(send_result.get("message_id") or "")
             self._shared_runtime.mark_waiting_for_reply(
-                question_id,
+                resolved_question_id,
                 question_message_id=question_message_id,
                 sent_at_ms=_resolve_sent_at_ms(send_result),
                 target_chat_id=str(send_result.get("chat_id") or ""),
@@ -206,7 +217,7 @@ class AskRuntimeOrchestrator:
                 try:
                     wait_result = await asyncio.to_thread(
                         self._shared_runtime.wait_for_question,
-                        question_id,
+                        resolved_question_id,
                         wait_options.timeout_seconds,
                     )
                     break
@@ -226,10 +237,11 @@ class AskRuntimeOrchestrator:
                 except PendingQuestionTimeout:
                     timeout_attempt += 1
                     timeout_result = await self._handle_ask_timeout(
-                        question_id=question_id,
+                        question_id=resolved_question_id,
                         question_text=question_text,
                         question_message_id=question_message_id,
-                        target_open_id=target_open_id,
+                        reminder_receive_id_type=resolved_receive_id_type,
+                        reminder_receive_id=resolved_receive_id,
                         wait_options=wait_options,
                         timeout_attempt=timeout_attempt,
                     )
@@ -242,13 +254,14 @@ class AskRuntimeOrchestrator:
                 reply_message_type=str(wait_result.get("message_type") or ""),
             )
             downloaded_paths = await self._service.download_reply_resources(
-                question_id=question_id,
+                question_id=resolved_question_id,
                 resource_refs=list(wait_result.get("resource_refs") or []),
                 target_root=self._download_root,
             )
             user_answer = str(wait_result.get("text") or "").strip()
+            display_answer = str(wait_result.get("display_text") or "").strip()
             if question_message_id:
-                card_answer = user_answer or ("已收到资源文件" if downloaded_paths else "")
+                card_answer = display_answer or user_answer or ("已收到资源文件" if downloaded_paths else "")
                 if not user_answer and downloaded_paths:
                     user_answer = ASK_RESOURCES_ONLY_ANSWER
                 await self._best_effort_update_question_card(
@@ -260,15 +273,19 @@ class AskRuntimeOrchestrator:
                 )
             elif not user_answer and downloaded_paths:
                 user_answer = ASK_RESOURCES_ONLY_ANSWER
-            return {
+            result = {
                 "ok": True,
-                "question_id": question_id,
+                "question_id": resolved_question_id,
                 "status": "answered",
                 "user_answer": user_answer,
                 "downloaded_paths": downloaded_paths,
             }
+            card_action = wait_result.get("card_action")
+            if isinstance(card_action, dict):
+                result["card_action"] = card_action
+            return result
         finally:
-            self._shared_runtime.unregister_pending_question(question_id)
+            self._shared_runtime.unregister_pending_question(resolved_question_id)
 
     async def _handle_ask_timeout(
         self,
@@ -276,15 +293,16 @@ class AskRuntimeOrchestrator:
         question_id: str,
         question_text: str,
         question_message_id: str,
-        target_open_id: str,
+        reminder_receive_id_type: str,
+        reminder_receive_id: str,
         wait_options: AskWaitOptions,
         timeout_attempt: int,
     ) -> dict[str, Any]:
         if wait_options.timeout_reminder_text and timeout_attempt <= wait_options.reminder_max_attempts:
             try:
                 await self._service.send_text(
-                    receive_id_type="open_id",
-                    receive_id=target_open_id,
+                    receive_id_type=reminder_receive_id_type,
+                    receive_id=reminder_receive_id,
                     text=wait_options.timeout_reminder_text,
                 )
             except (FeishuAPIError, MessageValidationError) as exc:

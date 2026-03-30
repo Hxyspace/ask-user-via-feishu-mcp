@@ -28,11 +28,13 @@ class FakeTimeoutMessageService:
 
     async def send_interactive(self, **kwargs):
         self.sent_interactive.append(kwargs)
+        receive_id_type = str(kwargs.get("receive_id_type") or "open_id")
+        receive_id = str(kwargs.get("receive_id") or "ou_owner")
         return {
             "ok": True,
             "message_id": "om_question",
-            "receive_id": "ou_owner",
-            "chat_id": "oc_p2p",
+            "receive_id": receive_id,
+            "chat_id": receive_id if receive_id_type == "chat_id" else "oc_p2p",
             "create_time_ms": 1234567890123,
         }
 
@@ -247,6 +249,7 @@ class AskRuntimeTest(unittest.TestCase):
                 receive_id_type=kwargs.get("receive_id_type", "open_id"),
                 receive_id=kwargs.get("receive_id", settings.owner_open_id),
                 wait_options=build_wait_options(settings),
+                card=kwargs.get("card"),
             )
         )
 
@@ -455,3 +458,27 @@ class AskRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.waiting_calls[0]["question_message_id"], "om_question")
         self.assertEqual(runtime.waiting_calls[0]["target_chat_id"], "oc_p2p")
         self.assertEqual(runtime.waiting_calls[0]["sent_at_ms"], 1234567890123)
+
+    def test_chat_id_ask_routes_delivery_to_chat_but_keeps_owner_as_allowed_actor(self) -> None:
+        settings = self._settings(
+            ASK_REMINDER_MAX_ATTEMPTS="1",
+            ASK_TIMEOUT_REMINDER_TEXT="请在群里回复",
+            ASK_TIMEOUT_DEFAULT_ANSWER="[AUTO_RECALL]",
+        )
+        fake_service = FakeTimeoutMessageService()
+        runtime = FakeTimeoutRuntime()
+
+        result = self._run_ask(
+            settings,
+            fake_service,
+            runtime,
+            receive_id_type="chat_id",
+            receive_id="oc_group_123",
+        )
+
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(fake_service.sent_interactive[0]["receive_id_type"], "chat_id")
+        self.assertEqual(fake_service.sent_interactive[0]["receive_id"], "oc_group_123")
+        self.assertEqual(fake_service.sent_texts[0]["receive_id_type"], "chat_id")
+        self.assertEqual(fake_service.sent_texts[0]["receive_id"], "oc_group_123")
+        self.assertEqual(runtime.registered_questions[0]["target_open_id"], "ou_owner")

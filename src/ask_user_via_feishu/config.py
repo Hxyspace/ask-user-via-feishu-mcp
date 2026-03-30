@@ -24,6 +24,7 @@ class Settings:
     runtime_config_path: str = DEFAULT_RUNTIME_CONFIG_PATH
     log_level: str = "INFO"
     owner_open_id: str = ""
+    chat_id: str = ""
     reaction_enabled: bool = True
     reaction_emoji_type: str = "Typing"
     ask_timeout_seconds: int = 600
@@ -61,6 +62,11 @@ class Settings:
             owner_open_id=_first_non_empty(
                 env.get("OWNER_OPEN_ID"),
                 _get_config_string(runtime_config, ("owner_open_id",)),
+                default="",
+            ),
+            chat_id=_first_non_empty(
+                env.get("CHAT_ID"),
+                _get_config_string(runtime_config, ("chat_id",)),
                 default="",
             ),
             reaction_enabled=_resolve_bool(
@@ -109,6 +115,7 @@ class Settings:
             "runtime_config_path": self.runtime_config_path,
             "log_level": self.log_level,
             "owner_open_id": self.owner_open_id,
+            "chat_id": self.chat_id,
             "reaction_enabled": self.reaction_enabled,
             "reaction_emoji_type": self.reaction_emoji_type,
             "ask_timeout_seconds": self.ask_timeout_seconds,

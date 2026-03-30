@@ -38,6 +38,52 @@ class MessageService:
             "token_fetch_ok": True,
         }
 
+    async def list_owner_chats(self) -> list[dict[str, str]]:
+        response = await self._message_client.list_chats(user_id_type="open_id", page_size=100)
+        data = response.get("data") or {}
+        items = data.get("items") or []
+        if not isinstance(items, list):
+            raise MessageValidationError("Chat list did not return a valid items array.")
+        owner_open_id = self._settings.owner_open_id.strip()
+        normalized: list[dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            chat_id = str(item.get("chat_id") or "").strip()
+            if not chat_id:
+                continue
+            owner_id = str(item.get("owner_id") or "").strip()
+            if owner_open_id and owner_id != owner_open_id:
+                continue
+            normalized.append(
+                {
+                    "chat_id": chat_id,
+                    "name": str(item.get("name") or "").strip(),
+                }
+            )
+        normalized.sort(key=lambda item: (item["name"] or item["chat_id"]).lower())
+        return normalized
+
+    async def create_owner_chat(self, *, name: str, uuid: str | None = None) -> dict[str, Any]:
+        chat_name = name.strip()
+        if not chat_name:
+            raise MessageValidationError("chat name must not be empty.")
+        created = await self._message_client.create_chat(
+            name=chat_name,
+            owner_open_id=self._settings.owner_open_id,
+            uuid=uuid,
+        )
+        data = created.get("data") or {}
+        chat_id = str(data.get("chat_id") or "").strip()
+        if not chat_id:
+            raise MessageValidationError("Chat create did not return a valid chat_id.")
+        resolved_name = str(data.get("name") or "").strip() or chat_name
+        return {
+            "ok": True,
+            "chat_id": chat_id,
+            "name": resolved_name,
+        }
+
     async def send_text(
         self,
         *,

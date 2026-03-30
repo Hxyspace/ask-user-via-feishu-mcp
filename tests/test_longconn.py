@@ -314,6 +314,97 @@ class LongConnectionTest(unittest.TestCase):
         with self.assertRaises(PendingQuestionTimeout):
             runtime.wait_for_question("ask_123", 0)
 
+    def test_shared_runtime_captures_group_text_reply_when_target_chat_known(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+            target_chat_id="oc_group",
+        )
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply",
+                    "chat_id": "oc_group",
+                    "chat_type": "group",
+                    "create_time": "1000",
+                    "message_type": "text",
+                    "content": '{"text":"hello group"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+        result = runtime.wait_for_question("ask_123", 1)
+
+        self.assertEqual(result["text"], "hello group")
+        self.assertEqual(result["chat_id"], "oc_group")
+
+    def test_shared_runtime_ignores_text_reply_for_target_selection_question(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="select_target_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+        runtime.mark_waiting_for_reply(
+            "select_target_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+        )
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply",
+                    "chat_id": "oc_p2p",
+                    "chat_type": "p2p",
+                    "create_time": "1000",
+                    "message_type": "text",
+                    "content": '{"text":"project-alpha"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+
+        with self.assertRaises(PendingQuestionTimeout):
+            runtime.wait_for_question("select_target_123", 0)
+
+        response = runtime.handle_event(
+            "card.action.trigger",
+            {
+                "operator": {"open_id": "ou_owner"},
+                "action": {
+                    "value": {
+                        "action": "feishu_select_chat_target",
+                        "question_id": "select_target_123",
+                        "selection_kind": "new_chat",
+                    },
+                    "form_value": {
+                        "new_chat_name": "project-alpha",
+                    },
+                },
+                "context": {"open_message_id": "om_question", "open_chat_id": "oc_p2p"},
+            },
+        )
+        result = runtime.wait_for_question("select_target_123", 1)
+
+        self.assertEqual(result["text"], "project-alpha")
+        self.assertEqual(result["message_type"], "card_action")
+        self.assertEqual(response.toast.content, "已收到你的选择")
+
     def test_shared_runtime_ignores_reply_before_question_is_waiting(self) -> None:
         processor = FakeEventProcessor()
         runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
@@ -407,6 +498,46 @@ class LongConnectionTest(unittest.TestCase):
 
         with self.assertRaises(PendingQuestionTimeout):
             runtime.wait_for_question("ask_123", 0)
+
+    def test_shared_runtime_captures_card_input_submission(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+        )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+            target_chat_id="oc_123",
+        )
+
+        response = runtime.handle_event(
+            "card.action.trigger",
+            {
+                "operator": {"open_id": "ou_owner"},
+                "action": {
+                    "value": {
+                        "action": "feishu_select_chat_target",
+                        "question_id": "ask_123",
+                        "selection_kind": "new_chat",
+                    },
+                    "form_value": {
+                        "new_chat_name": "project-alpha",
+                    },
+                },
+                "context": {"open_message_id": "om_question", "open_chat_id": "oc_123"},
+            },
+        )
+        result = runtime.wait_for_question("ask_123", 1)
+
+        self.assertEqual(result["text"], "project-alpha")
+        self.assertEqual(result["display_text"], "新建群聊：project-alpha")
+        self.assertEqual(result["card_action"]["value"]["selection_kind"], "new_chat")
+        self.assertEqual(response.toast.content, "已收到你的选择")
 
     def test_shared_runtime_ignores_reply_from_different_chat_when_target_chat_known(self) -> None:
         processor = FakeEventProcessor()

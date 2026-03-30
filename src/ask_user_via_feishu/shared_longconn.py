@@ -15,6 +15,12 @@ from ask_user_via_feishu.longconn import FeishuLongConnectionSubscriber, LongCon
 
 logger = logging.getLogger(__name__)
 
+SELECT_TARGET_NEW_CHAT_FIELD = "new_chat_name"
+
+
+def _is_target_selection_question(question_id: str) -> bool:
+    return question_id.startswith("select_target_")
+
 
 class PendingQuestionTimeout(RuntimeError):
     """Raised when a shared-runtime question does not receive an answer in time."""
@@ -254,9 +260,6 @@ class FeishuSharedLongConnectionRuntime:
         if not sender_open_id:
             return None
         message = event.get("message") or {}
-        chat_type = str(message.get("chat_type") or event.get("chat_type") or "").strip().lower()
-        if chat_type and chat_type != "p2p":
-            return None
         content = parse_message_content(message)
         message_type = str(message.get("message_type") or message.get("msg_type") or "").strip().lower()
         text = _extract_reply_text(content, message_type=message_type)
@@ -277,9 +280,14 @@ class FeishuSharedLongConnectionRuntime:
             record = self._pending_by_open_id.get(sender_open_id)
         if record is None or record.status != "waiting_reply":
             return None
+        if _is_target_selection_question(record.question_id):
+            return None
+        chat_type = str(message.get("chat_type") or event.get("chat_type") or "").strip().lower()
+        if not record.target_chat_id and chat_type and chat_type != "p2p":
+            return None
         if record.sent_at_ms and message_create_time_ms is not None and message_create_time_ms < record.sent_at_ms:
             return None
-        if record.target_chat_id and message_chat_id and message_chat_id != record.target_chat_id:
+        if record.target_chat_id and message_chat_id != record.target_chat_id:
             return None
         record.resolve(
             {
@@ -306,36 +314,84 @@ class FeishuSharedLongConnectionRuntime:
     def _capture_card_choice(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         event = payload.get("event") or {}
         operator_open_id = str(event.get("operator", {}).get("open_id") or "").strip()
-        chat_type = str(event.get("context", {}).get("chat_type") or event.get("chat_type") or "").strip().lower()
-        if chat_type and chat_type != "p2p":
-            return None
-        action_value = event.get("action", {}).get("value", {})
+        action_payload = event.get("action", {})
+        action_value = action_payload.get("value", {})
         if not isinstance(action_value, dict):
-            return None
+            action_value = {}
+        form_value = action_payload.get("form_value")
+        if not isinstance(form_value, dict):
+            form_value = {}
         target_question_id = str(action_value.get("question_id") or "").strip()
-        answer = str(action_value.get("answer") or "").strip()
         action = str(action_value.get("action") or "").strip()
-        if action != "feishu_ask_user_choice" or not target_question_id or not answer:
+        if not target_question_id or not action:
             return None
         with self._lock:
             record = self._pending_by_question_id.get(target_question_id)
         open_message_id = str(event.get("context", {}).get("open_message_id") or "").strip()
+        open_chat_id = str(event.get("context", {}).get("open_chat_id") or "").strip()
+        chat_type = str(event.get("context", {}).get("chat_type") or event.get("chat_type") or "").strip().lower()
         if record is None or record.status != "waiting_reply" or operator_open_id != record.target_open_id:
             return None
         if record.question_message_id and open_message_id and open_message_id != record.question_message_id:
             return None
+        if record.target_chat_id:
+            if open_chat_id != record.target_chat_id:
+                return None
+        elif chat_type and chat_type != "p2p":
+            return None
+        answer = ""
+        display_text = ""
+        toast_content = "已收到你的选择"
+        if action == "feishu_ask_user_choice":
+            answer = str(action_value.get("answer") or "").strip()
+            if not answer:
+                return None
+            display_text = answer
+        elif action == "feishu_select_chat_target":
+            selection_kind = str(action_value.get("selection_kind") or "").strip()
+            if selection_kind == "current_conversation":
+                answer = "current_conversation"
+                display_text = "继续使用当前会话"
+            elif selection_kind == "existing_chat":
+                chat_name = str(action_value.get("chat_name") or "").strip()
+                chat_id = str(action_value.get("chat_id") or "").strip()
+                if not chat_id:
+                    return None
+                answer = chat_id
+                display_text = f"切换到群聊：{chat_name or chat_id}"
+            elif selection_kind == "new_chat":
+                answer = str(form_value.get(SELECT_TARGET_NEW_CHAT_FIELD) or "").strip()
+                if not answer:
+                    return {
+                        "handled": True,
+                        "reply_sent": False,
+                        "callback_response": {
+                            "toast": {"type": "warning", "content": "请先填写群聊名称"},
+                        },
+                    }
+                display_text = f"新建群聊：{answer}"
+            else:
+                return None
+        else:
+            return None
+        card_action = {
+            "action": action,
+            "value": dict(action_value),
+        }
         record.resolve(
             {
                 "ok": True,
                 "sender_open_id": operator_open_id,
-                "chat_id": str(event.get("context", {}).get("open_chat_id") or "").strip(),
-                "message_id": str(event.get("context", {}).get("open_message_id") or "").strip(),
+                "chat_id": open_chat_id,
+                "message_id": open_message_id,
                 "message_type": "card_action",
                 "text": answer,
-                "message_content": {"text": answer},
+                "display_text": display_text,
+                "message_content": {"text": answer, "card_action": card_action},
+                "card_action": card_action,
                 "create_time_ms": 0,
                 "callback_response": {
-                    "toast": {"type": "success", "content": "已收到你的选择"},
+                    "toast": {"type": "success", "content": toast_content},
                 },
             }
         )
@@ -348,7 +404,7 @@ class FeishuSharedLongConnectionRuntime:
             "handled": True,
             "reply_sent": False,
             "callback_response": {
-                "toast": {"type": "success", "content": "已收到你的选择"},
+                "toast": {"type": "success", "content": toast_content},
             },
         }
 

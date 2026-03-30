@@ -2,6 +2,7 @@
   "app_id": "cli_xxx",
   "app_secret": "xxx",
   "owner_open_id": "ou_xxx",
+  "chat_id": "oc_xxx",
   "reaction": {
     "enabled": true,
     "emoji_type": "Typing"

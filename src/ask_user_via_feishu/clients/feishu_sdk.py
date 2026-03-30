@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+import uuid as uuid_lib
 from typing import Any
 
 import lark_oapi as lark
@@ -13,6 +14,8 @@ from lark_oapi.api.auth.v3 import (
 from lark_oapi.api.im.v1 import (
     CreateFileRequest,
     CreateFileRequestBody,
+    CreateChatRequest,
+    CreateChatRequestBody,
     CreateImageRequest,
     CreateImageRequestBody,
     CreateMessageReactionRequest,
@@ -22,12 +25,15 @@ from lark_oapi.api.im.v1 import (
     DeleteMessageReactionRequest,
     Emoji,
     GetMessageResourceRequest,
+    ListChatRequest,
     PatchMessageRequest,
     PatchMessageRequestBody,
 )
 
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.errors import FeishuAPIError
+
+DEFAULT_OWNER_CHAT_AVATAR_KEY = "v3_00109_1c4c237f-251b-4e43-8003-1f2eccd531dg"
 
 
 class FeishuSDKClient:
@@ -133,6 +139,73 @@ class FeishuSDKClient:
         response = await self._client.im.v1.message.apatch(request)
         self._ensure_success(response, operation_name="im.message.patch")
         return {"code": 0, "data": {"message_id": message_id}}
+
+    async def list_chats(
+        self,
+        *,
+        user_id_type: str = "open_id",
+        page_size: int = 100,
+    ) -> dict[str, Any]:
+        page_token = ""
+        items: list[dict[str, Any]] = []
+        while True:
+            request_builder = ListChatRequest.builder().user_id_type(user_id_type).page_size(page_size)
+            if page_token:
+                request_builder = request_builder.page_token(page_token)
+            request = request_builder.build()
+            response = await self._client.im.v1.chat.alist(request)
+            self._ensure_success(response, operation_name="im.chat.list")
+            data = getattr(response, "data", None)
+            response_items = list(getattr(data, "items", None) or [])
+            for item in response_items:
+                items.append(
+                    {
+                        "chat_id": str(getattr(item, "chat_id", "") or ""),
+                        "name": str(getattr(item, "name", "") or ""),
+                        "owner_id": str(getattr(item, "owner_id", "") or ""),
+                    }
+                )
+            has_more = bool(getattr(data, "has_more", False))
+            page_token = str(getattr(data, "page_token", "") or "")
+            if not has_more:
+                break
+        return {"code": 0, "data": {"items": items}}
+
+    async def create_chat(
+        self,
+        *,
+        name: str,
+        owner_open_id: str,
+        uuid: str | None = None,
+    ) -> dict[str, Any]:
+        request = (
+            CreateChatRequest.builder()
+            .user_id_type("open_id")
+            .uuid(uuid or f"create_chat_{uuid_lib.uuid4().hex}")
+            .request_body(
+                CreateChatRequestBody.builder()
+                .name(name)
+                .avatar(DEFAULT_OWNER_CHAT_AVATAR_KEY)
+                .owner_id(owner_open_id)
+                .user_id_list([owner_open_id])
+                .chat_mode("group")
+                .chat_type("private")
+                .group_message_type("chat")
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.im.v1.chat.acreate(request)
+        self._ensure_success(response, operation_name="im.chat.create")
+        data = getattr(response, "data", None)
+        return {
+            "code": 0,
+            "data": {
+                "chat_id": str(getattr(data, "chat_id", "") or ""),
+                "name": str(getattr(data, "name", "") or ""),
+                "owner_id": str(getattr(data, "owner_id", "") or ""),
+            },
+        }
 
     async def create_message_reaction(self, *, message_id: str, emoji_type: str) -> dict[str, Any]:
         request = CreateMessageReactionRequest.builder().message_id(message_id).request_body(

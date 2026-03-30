@@ -9,7 +9,7 @@
 
 ## 📋 项目介绍
 
-`ask-user-via-feishu` 是一个面向单一 owner 的 Feishu MCP Server，用来把 LLM 的“发消息”和“向用户提问并等待回复”能力接到飞书私聊中。
+`ask-user-via-feishu` 是一个面向单一 owner 的 Feishu MCP Server，用来把 LLM 的“发消息”和“向用户提问并等待回复”能力接到飞书 owner 会话中。当前版本仍然只接受配置 owner 的回复，但消息与提问目标已经可以落到 owner 当前会话或选定的群聊。
 
 项目基于 Python 与 `mcp[cli]` 实现，默认通过 stdio 运行，挂到 MCP Host 中使用。它支持发送文本、图片、文件、Feishu post 富文本消息，也支持通过共享的飞书长连接在后台等待 owner 的文本回复、卡片按钮选择，或图片/文件资源回传。
 
@@ -25,12 +25,13 @@
 - **双向交互**：既能主动发消息，也能等待飞书侧用户回复。
 - **共享长连接运行时**：`ask_user_via_feishu` 使用共享长连接监听飞书事件，避免每次提问都单独建立事件通道。
 - **卡片按钮选择**：提问时可附带选项，飞书侧会渲染交互卡片按钮。
+- **会话目标切换**：可通过静态 `CHAT_ID` 直接路由到群聊；未配置时，首次 send/ask 会先在 owner 当前会话里弹出一张 1.0 结构的选群卡片，支持点击切回当前会话、选择已发现群聊，或在卡片中输入群名后新建群聊。
 - **资源回传下载**：用户如果回复图片或文件，服务会以流式写盘方式下载到共享 daemon runtime 目录下的 `attachments/YYYY-MM-DD/` 目录，并在返回结果中给出本地路径。
 - **超时提醒与默认答案**：支持提醒重试、默认答案，以及 `[AUTO_RECALL]` 自动召回模式。
 
 ## 🎯 适用场景
 
-- 让 LLM 通过飞书私聊向用户发送执行结果、告警或中间状态。
+- 让 LLM 通过飞书当前会话或项目群聊向用户发送执行结果、告警或中间状态。
 - 让 LLM 在需要人工确认时，通过飞书发起提问并等待用户的回复。
 - 让用户通过飞书上传文件或图片，再把资源路径返回给 LLM 继续处理。
 - 适合人在外面、不在电脑旁时，也能直接通过飞书继续给 LLM 下一步指示。
@@ -176,6 +177,7 @@ python -m ask_user_via_feishu
 | `APP_ID` | 是 | - | 飞书应用 App ID |
 | `APP_SECRET` | 是 | - | 飞书应用 App Secret |
 | `OWNER_OPEN_ID` | 是 | - | 允许交互的唯一 owner |
+| `CHAT_ID` | 否 | 空 | 固定把 send/ask 路由到该群聊；未配置时首次调用会走会话选择 bootstrap |
 | `LOG_LEVEL` | 否 | `INFO` | 日志级别 |
 | `BASE_URL` | 否 | `https://open.feishu.cn` | 飞书开放平台地址 |
 | `API_TIMEOUT_SECONDS` | 否 | `10` | Feishu SDK / API 请求超时时间 |
@@ -196,6 +198,7 @@ python -m ask_user_via_feishu
   "app_id": "cli_xxx",
   "app_secret": "xxx",
   "owner_open_id": "ou_xxx",
+  "chat_id": "oc_xxx",
   "reaction": {
     "enabled": true,
     "emoji_type": "Typing"
@@ -209,7 +212,7 @@ python -m ask_user_via_feishu
 }
 ```
 
-启动前至少要保证 `APP_ID`、`APP_SECRET` 和 `OWNER_OPEN_ID` 最终可被解析到，否则服务会在启动校验阶段报错。
+启动前至少要保证 `APP_ID`、`APP_SECRET` 和 `OWNER_OPEN_ID` 最终可被解析到，否则服务会在启动校验阶段报错。`CHAT_ID` 是可选项：配置后会直接把后续 send/ask 路由到该会话；不配置则在第一次 send/ask 时，通过 owner 当前 P2P 会话弹卡选择目标。
 
 ## 🔧 MCP 工具
 
@@ -217,17 +220,19 @@ python -m ask_user_via_feishu
 
 | 工具名 | 作用 |
 | --- | --- |
-| `send_text_message` | 向 owner 发送文本消息 |
-| `send_image_message` | 向 owner 发送图片 |
-| `send_file_message` | 向 owner 发送文件 |
-| `send_post_message` | 向 owner 发送 Feishu post 富文本消息 |
-| `ask_user_via_feishu` | 向 owner 发起提问，并等待文本回复、按钮选择或资源回复 |
+| `send_text_message` | 向当前激活会话发送文本消息 |
+| `send_image_message` | 向当前激活会话发送图片 |
+| `send_file_message` | 向当前激活会话发送文件 |
+| `send_post_message` | 向当前激活会话发送 Feishu post 富文本消息 |
+| `ask_user_via_feishu` | 向当前激活会话发起提问，并等待 owner 的文本回复、按钮选择或资源回复 |
 
 ### `ask_user_via_feishu` 的核心行为
 
-- 向 owner 发送问题卡片；
+- 若未配置 `CHAT_ID` 且当前进程内还没有选中过目标，会先在 owner 当前 P2P 会话里发一张“选择会话”卡片；
+- 若要新建群聊，可在选择卡片中输入群名并点击提交；
+- 选定目标后，向当前激活会话发送问题卡片；
 - 可选附带按钮选项；
-- 后台等待 owner 的下一条私聊回复或卡片按钮操作；
+- 后台等待 owner 在该目标会话中的下一条文本回复、卡片按钮操作，或资源消息；
 - 如果回复包含图片/文件，会以流式方式自动下载到共享 daemon runtime 目录；
 - 返回结构中包含 `status`、`user_answer`、`downloaded_paths`。
 
@@ -309,7 +314,9 @@ python -m build
 ## ⚠️ 已知限制
 
 - 这是一个 **owner-only** 服务，不适用于多人共享机器人场景。
-- 当前仅处理飞书私聊（P2P）上下文，不处理群聊交互。
+- 当前只允许配置的 owner 作为合法回复 actor；即使 send/ask 路由到了群聊，也不会接受其他成员的回答。
+- 只支持全局单 pending ask；暂不支持不同群聊上的并发 ask / queue。
+- 未配置 `CHAT_ID` 时，激活目标只保存在当前 MCP 进程内存中；进程重启后需要重新选择。
 - 同一 `OWNER_OPEN_ID` 同时只能存在一个 pending question。
 - 项目默认运行模式是 stdio MCP Server。
 

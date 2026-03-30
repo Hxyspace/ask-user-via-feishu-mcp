@@ -56,9 +56,10 @@ class SharedLongConnDaemonClient:
         uuid: str | None,
         receive_id_type: str,
         receive_id: str,
-        client_id: str,
-        client_request_id: str,
         wait_options: AskWaitOptions,
+        allowed_actor_open_id: str | None = None,
+        question_id: str | None = None,
+        card: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "question": question,
@@ -66,21 +67,26 @@ class SharedLongConnDaemonClient:
             "uuid": uuid,
             "receive_id_type": receive_id_type,
             "receive_id": receive_id,
-            "client_id": client_id,
-            "client_request_id": client_request_id,
             "timeout_seconds": wait_options.timeout_seconds,
             "reminder_max_attempts": wait_options.reminder_max_attempts,
             "timeout_reminder_text": wait_options.timeout_reminder_text,
             "timeout_default_answer": wait_options.timeout_default_answer,
+            "allowed_actor_open_id": allowed_actor_open_id,
+            "question_id": question_id,
+            "card": card,
         }
         data = await self._post_json("/v1/ask_and_wait", payload)
-        return {
+        result = {
             "ok": bool(data.get("ok")),
             "question_id": str(data.get("question_id") or ""),
             "status": str(data.get("status") or ""),
             "user_answer": str(data.get("user_answer") or ""),
             "downloaded_paths": list(data.get("downloaded_paths") or []),
         }
+        card_action = data.get("card_action")
+        if isinstance(card_action, dict):
+            result["card_action"] = card_action
+        return result
 
     async def send_text_message(
         self,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.daemon.app import SharedLongConnDaemonApp
@@ -126,3 +126,39 @@ class DaemonAppTest(unittest.TestCase):
         self.assertEqual(status["daemon_state"], "shutting_down")
         self.assertEqual(status["failure_reason"], "ws failed")
         app._server.shutdown.assert_called_once()
+
+    def test_ask_and_wait_forwards_optional_card_fields(self) -> None:
+        service = FakeMessageService()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            with (
+                patch("ask_user_via_feishu.daemon.app.build_message_service", return_value=service),
+                patch("ask_user_via_feishu.daemon.app.build_event_processor", return_value=object()),
+                patch("ask_user_via_feishu.daemon.app.FeishuSharedLongConnectionRuntime", return_value=FakeSharedRuntime()),
+            ):
+                app = SharedLongConnDaemonApp(self._settings(), runtime_dir=runtime_dir)
+                self.addCleanup(app._server.close)
+                app._ask_runtime.ask = AsyncMock(return_value={"ok": True, "status": "answered", "user_answer": "done"})
+
+                app._ask_and_wait(
+                    {
+                        "question": "继续吗？",
+                        "choices": [],
+                        "receive_id_type": "chat_id",
+                        "receive_id": "oc_demo",
+                        "allowed_actor_open_id": "ou_demo",
+                        "question_id": "select_123",
+                        "card": {"header": {"title": {"tag": "plain_text", "content": "选择会话"}}},
+                        "timeout_seconds": 60,
+                        "reminder_max_attempts": 0,
+                        "timeout_reminder_text": "",
+                        "timeout_default_answer": "",
+                    }
+                )
+
+        call_kwargs = app._ask_runtime.ask.await_args.kwargs
+        self.assertEqual(call_kwargs["receive_id_type"], "chat_id")
+        self.assertEqual(call_kwargs["receive_id"], "oc_demo")
+        self.assertEqual(call_kwargs["allowed_actor_open_id"], "ou_demo")
+        self.assertEqual(call_kwargs["question_id"], "select_123")
+        self.assertEqual(call_kwargs["card"]["header"]["title"]["content"], "选择会话")

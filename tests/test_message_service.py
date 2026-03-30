@@ -41,6 +41,42 @@ class FakeMessageClient:
         self.calls.append(("update_message_card", kwargs))
         return {"code": 0, "data": {"message_id": kwargs["message_id"]}}
 
+    async def list_chats(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("list_chats", kwargs))
+        return {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "chat_id": "oc_owner_2",
+                        "name": "beta",
+                        "owner_id": "ou_owner",
+                    },
+                    {
+                        "chat_id": "oc_other",
+                        "name": "other",
+                        "owner_id": "ou_other",
+                    },
+                    {
+                        "chat_id": "oc_owner_1",
+                        "name": "alpha",
+                        "owner_id": "ou_owner",
+                    },
+                ]
+            },
+        }
+
+    async def create_chat(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("create_chat", kwargs))
+        return {
+            "code": 0,
+            "data": {
+                "chat_id": "oc_created",
+                "name": kwargs["name"],
+                "owner_id": kwargs["owner_open_id"],
+            },
+        }
+
     async def download_message_resource(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("download_message_resource", kwargs))
         if kwargs["resource_type"] == "image":
@@ -92,6 +128,43 @@ class MessageServiceTest(unittest.TestCase):
             },
         )
         self.assertEqual(client.health_checks, 1)
+
+    def test_list_owner_chats_filters_to_owner_and_sorts_by_name(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, self._settings())
+
+        result = asyncio.run(service.list_owner_chats())
+
+        self.assertEqual(
+            result,
+            [
+                {"chat_id": "oc_owner_1", "name": "alpha"},
+                {"chat_id": "oc_owner_2", "name": "beta"},
+            ],
+        )
+        self.assertEqual(client.calls[0], ("list_chats", {"user_id_type": "open_id", "page_size": 100}))
+
+    def test_create_owner_chat_normalizes_created_chat(self) -> None:
+        client = FakeMessageClient()
+        service = MessageService(client, self._settings())
+
+        result = asyncio.run(service.create_owner_chat(name="project-alpha", uuid="create_123"))
+
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "chat_id": "oc_created",
+                "name": "project-alpha",
+            },
+        )
+        self.assertEqual(
+            client.calls[0],
+            (
+                "create_chat",
+                {"name": "project-alpha", "owner_open_id": "ou_owner", "uuid": "create_123"},
+            ),
+        )
 
     def test_send_text_uses_owner_as_default_target(self) -> None:
         client = FakeMessageClient()

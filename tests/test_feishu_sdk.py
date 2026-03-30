@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import unittest
 
 from ask_user_via_feishu.clients.feishu_sdk import FeishuSDKClient
+from ask_user_via_feishu.clients.feishu_sdk import DEFAULT_OWNER_CHAT_AVATAR_KEY
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.errors import FeishuAPIError
 
@@ -104,6 +105,22 @@ class FakeMessageReactionEndpoint:
         return self.delete_response
 
 
+class FakeChatEndpoint:
+    def __init__(self, *, list_response: FakeSDKResponse, create_response: FakeSDKResponse) -> None:
+        self.list_response = list_response
+        self.create_response = create_response
+        self.list_requests = []
+        self.create_requests = []
+
+    async def alist(self, request: object) -> FakeSDKResponse:
+        self.list_requests.append(request)
+        return self.list_response
+
+    async def acreate(self, request: object) -> FakeSDKResponse:
+        self.create_requests.append(request)
+        return self.create_response
+
+
 class FakeLarkClient:
     def __init__(
         self,
@@ -116,6 +133,8 @@ class FakeLarkClient:
         message_resource_response: FakeSDKResponse | None = None,
         reaction_create_response: FakeSDKResponse | None = None,
         reaction_delete_response: FakeSDKResponse | None = None,
+        chat_list_response: FakeSDKResponse | None = None,
+        chat_create_response: FakeSDKResponse | None = None,
     ) -> None:
         self.tenant_access_token = FakeTenantAccessTokenEndpoint(
             tenant_access_token_response or FakeSDKResponse()
@@ -144,6 +163,30 @@ class FakeLarkClient:
             create_response=reaction_create_response or FakeSDKResponse(data=SimpleNamespace(reaction_id="react_123")),
             delete_response=reaction_delete_response or FakeSDKResponse(),
         )
+        self.chat = FakeChatEndpoint(
+            list_response=chat_list_response
+            or FakeSDKResponse(
+                data=SimpleNamespace(
+                    items=[
+                        SimpleNamespace(
+                            chat_id="oc_1",
+                            name="alpha",
+                            owner_id="ou_owner",
+                        )
+                    ],
+                    has_more=False,
+                    page_token="",
+                )
+            ),
+            create_response=chat_create_response
+            or FakeSDKResponse(
+                data=SimpleNamespace(
+                    chat_id="oc_created",
+                    name="project-alpha",
+                    owner_id="ou_owner",
+                )
+            ),
+        )
         self.auth = SimpleNamespace(v3=SimpleNamespace(tenant_access_token=self.tenant_access_token))
         self.im = SimpleNamespace(
             v1=SimpleNamespace(
@@ -152,6 +195,7 @@ class FakeLarkClient:
                 file=self.file,
                 message_resource=self.message_resource,
                 message_reaction=self.message_reaction,
+                chat=self.chat,
             )
         )
 
@@ -307,3 +351,62 @@ class FeishuSDKClientTest(unittest.TestCase):
         self.assertEqual(delete_request.reaction_id, "react_123")
         self.assertEqual(created, {"code": 0, "data": {"reaction_id": "react_123"}})
         self.assertEqual(deleted, {"code": 0, "data": {}})
+
+    def test_list_chats_maps_request_and_items(self) -> None:
+        fake_client = FakeLarkClient()
+        client = FeishuSDKClient(self._settings(), client=fake_client)
+
+        result = asyncio.run(client.list_chats(user_id_type="open_id", page_size=50))
+
+        request = fake_client.chat.list_requests[0]
+        self.assertEqual(request.user_id_type, "open_id")
+        self.assertEqual(request.page_size, 50)
+        self.assertEqual(
+            result,
+            {
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "chat_id": "oc_1",
+                            "name": "alpha",
+                            "owner_id": "ou_owner",
+                        }
+                    ]
+                },
+            },
+        )
+
+    def test_create_chat_maps_request_and_response(self) -> None:
+        fake_client = FakeLarkClient()
+        client = FeishuSDKClient(self._settings(), client=fake_client)
+
+        result = asyncio.run(
+            client.create_chat(
+                name="project-alpha",
+                owner_open_id="ou_owner",
+                uuid="create_123",
+            )
+        )
+
+        request = fake_client.chat.create_requests[0]
+        self.assertEqual(request.user_id_type, "open_id")
+        self.assertEqual(request.uuid, "create_123")
+        self.assertEqual(request.request_body.name, "project-alpha")
+        self.assertEqual(request.request_body.avatar, DEFAULT_OWNER_CHAT_AVATAR_KEY)
+        self.assertEqual(request.request_body.owner_id, "ou_owner")
+        self.assertEqual(request.request_body.user_id_list, ["ou_owner"])
+        self.assertEqual(request.request_body.chat_mode, "group")
+        self.assertEqual(request.request_body.chat_type, "private")
+        self.assertEqual(request.request_body.group_message_type, "chat")
+        self.assertEqual(
+            result,
+            {
+                "code": 0,
+                "data": {
+                    "chat_id": "oc_created",
+                    "name": "project-alpha",
+                    "owner_id": "ou_owner",
+                },
+            },
+        )

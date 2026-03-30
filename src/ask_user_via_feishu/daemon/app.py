@@ -67,6 +67,9 @@ class SharedLongConnDaemonApp:
         choices_value = payload.get("choices") or []
         if choices_value is not None and not isinstance(choices_value, list):
             raise ValueError("choices must be a JSON array when provided.")
+        card_value = payload.get("card")
+        if card_value is not None and not isinstance(card_value, dict):
+            raise ValueError("card must be a JSON object when provided.")
         wait_options = AskWaitOptions(
             timeout_seconds=int(payload.get("timeout_seconds") or 0),
             reminder_max_attempts=int(payload.get("reminder_max_attempts") or 0),
@@ -81,6 +84,9 @@ class SharedLongConnDaemonApp:
                 receive_id_type=str(payload.get("receive_id_type") or "open_id"),
                 receive_id=str(payload.get("receive_id") or ""),
                 wait_options=wait_options,
+                allowed_actor_open_id=str(payload.get("allowed_actor_open_id") or "") or None,
+                question_id=str(payload.get("question_id") or "") or None,
+                card=card_value,
             )
         )
 

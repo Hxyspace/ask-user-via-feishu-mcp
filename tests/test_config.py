@@ -41,6 +41,31 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.owner_open_id, "ou_owner")
         self.assertEqual(settings.ask_timeout_seconds, 120)
 
+    def test_chat_id_can_come_from_runtime_config_and_be_overridden_by_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "app_id": "cli_cfg",
+                        "app_secret": "secret_cfg",
+                        "owner_open_id": "ou_owner",
+                        "chat_id": "oc_from_config",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            from_config = Settings.from_env({"RUNTIME_CONFIG_PATH": str(config_path)})
+            from_env = Settings.from_env(
+                {
+                    "RUNTIME_CONFIG_PATH": str(config_path),
+                    "CHAT_ID": "oc_from_env",
+                }
+            )
+
+        self.assertEqual(from_config.chat_id, "oc_from_config")
+        self.assertEqual(from_env.chat_id, "oc_from_env")
+
     def test_empty_timeout_default_answer_env_is_preserved(self) -> None:
         settings = Settings.from_env(
             {
