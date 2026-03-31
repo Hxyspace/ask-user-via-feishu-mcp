@@ -24,14 +24,17 @@ class FakeMessageService:
 
 
 class FakeSharedRuntime:
+    def __init__(self, *, pending: bool = False) -> None:
+        self.pending = pending
+
     def long_connection_state(self) -> str:
         return "running"
 
     def has_pending_question(self) -> bool:
-        return False
+        return self.pending
 
     def current_pending_question_id(self) -> str:
-        return ""
+        return "ask_pending" if self.pending else ""
 
     def ask_status_snapshot(self) -> AskStatusSnapshot:
         return AskStatusSnapshot(
@@ -55,8 +58,14 @@ class FakeSharedRuntime:
 
 
 class DaemonAppTest(unittest.TestCase):
-    def _settings(self) -> Settings:
-        return Settings(app_id="cli_demo", app_secret="secret_demo", owner_open_id="ou_demo")
+    def _settings(self, **overrides: object) -> Settings:
+        defaults: dict[str, object] = {
+            "app_id": "cli_demo",
+            "app_secret": "secret_demo",
+            "owner_open_id": "ou_demo",
+        }
+        defaults.update(overrides)
+        return Settings(**defaults)
 
     def test_initialize_does_not_create_local_tenant_token_file(self) -> None:
         service = FakeMessageService()
@@ -154,6 +163,117 @@ class DaemonAppTest(unittest.TestCase):
         self.assertEqual(status["queues_by_target"][0]["queued_client_request_ids"], ["request_beta"])
         self.assertEqual(status["queue_exempt_question_ids"], ["select_target_123"])
         app._server.shutdown.assert_called_once()
+
+    def test_request_activity_updates_inflight_and_timestamp(self) -> None:
+        service = FakeMessageService()
+        shared_runtime = FakeSharedRuntime()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            with (
+                patch("ask_user_via_feishu.daemon.app.build_message_service", return_value=service),
+                patch("ask_user_via_feishu.daemon.app.build_event_processor", return_value=object()),
+                patch("ask_user_via_feishu.daemon.app.FeishuSharedLongConnectionRuntime", return_value=shared_runtime),
+            ):
+                app = SharedLongConnDaemonApp(self._settings(), runtime_dir=runtime_dir)
+                self.addCleanup(app._server.close)
+                app._last_client_activity_at = 0
+
+                app._record_request_started("/v1/status")
+                started_timestamp = app._last_client_activity_at
+                self.assertEqual(app._in_flight_request_count, 1)
+                self.assertGreater(started_timestamp, 0)
+
+                app._record_request_finished("/v1/status")
+
+        self.assertEqual(app._in_flight_request_count, 0)
+        self.assertGreaterEqual(app._last_client_activity_at, started_timestamp)
+
+    def test_mark_serving_started_resets_idle_baseline(self) -> None:
+        service = FakeMessageService()
+        shared_runtime = FakeSharedRuntime()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            with (
+                patch("ask_user_via_feishu.daemon.app.build_message_service", return_value=service),
+                patch("ask_user_via_feishu.daemon.app.build_event_processor", return_value=object()),
+                patch("ask_user_via_feishu.daemon.app.FeishuSharedLongConnectionRuntime", return_value=shared_runtime),
+            ):
+                app = SharedLongConnDaemonApp(self._settings(), runtime_dir=runtime_dir)
+                self.addCleanup(app._server.close)
+                app._started_at_monotonic = 0
+                app._last_client_activity_at = 0
+
+                app._mark_serving_started(now_monotonic=50)
+
+        self.assertEqual(app._started_at_monotonic, 50)
+        self.assertEqual(app._last_client_activity_at, 50)
+
+    def test_idle_retirement_shuts_down_when_timeout_elapsed_without_pending_work(self) -> None:
+        service = FakeMessageService()
+        shared_runtime = FakeSharedRuntime()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            with (
+                patch("ask_user_via_feishu.daemon.app.build_message_service", return_value=service),
+                patch("ask_user_via_feishu.daemon.app.build_event_processor", return_value=object()),
+                patch("ask_user_via_feishu.daemon.app.FeishuSharedLongConnectionRuntime", return_value=shared_runtime),
+            ):
+                app = SharedLongConnDaemonApp(self._settings(), runtime_dir=runtime_dir)
+                self.addCleanup(app._server.close)
+                app._server.shutdown = Mock()
+                app._started_at_monotonic = 0
+                app._last_client_activity_at = 0
+
+                retired = app._maybe_retire_for_idle(now_monotonic=700)
+
+        self.assertTrue(retired)
+        self.assertEqual(app._status()["daemon_state"], "shutting_down")
+        app._server.shutdown.assert_called_once()
+
+    def test_idle_retirement_waits_for_pending_question(self) -> None:
+        service = FakeMessageService()
+        shared_runtime = FakeSharedRuntime(pending=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            with (
+                patch("ask_user_via_feishu.daemon.app.build_message_service", return_value=service),
+                patch("ask_user_via_feishu.daemon.app.build_event_processor", return_value=object()),
+                patch("ask_user_via_feishu.daemon.app.FeishuSharedLongConnectionRuntime", return_value=shared_runtime),
+            ):
+                app = SharedLongConnDaemonApp(self._settings(), runtime_dir=runtime_dir)
+                self.addCleanup(app._server.close)
+                app._server.shutdown = Mock()
+                app._started_at_monotonic = 0
+                app._last_client_activity_at = 0
+
+                retired = app._maybe_retire_for_idle(now_monotonic=700)
+
+        self.assertFalse(retired)
+        self.assertEqual(app._status()["daemon_state"], "serving")
+        app._server.shutdown.assert_not_called()
+
+    def test_idle_retirement_waits_for_inflight_request_completion(self) -> None:
+        service = FakeMessageService()
+        shared_runtime = FakeSharedRuntime()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            with (
+                patch("ask_user_via_feishu.daemon.app.build_message_service", return_value=service),
+                patch("ask_user_via_feishu.daemon.app.build_event_processor", return_value=object()),
+                patch("ask_user_via_feishu.daemon.app.FeishuSharedLongConnectionRuntime", return_value=shared_runtime),
+            ):
+                app = SharedLongConnDaemonApp(self._settings(), runtime_dir=runtime_dir)
+                self.addCleanup(app._server.close)
+                app._server.shutdown = Mock()
+                app._started_at_monotonic = 0
+                app._last_client_activity_at = 0
+                app._in_flight_request_count = 1
+
+                retired = app._maybe_retire_for_idle(now_monotonic=700)
+
+        self.assertFalse(retired)
+        self.assertEqual(app._status()["daemon_state"], "serving")
+        app._server.shutdown.assert_not_called()
 
     def test_ask_and_wait_forwards_optional_card_fields(self) -> None:
         service = FakeMessageService()

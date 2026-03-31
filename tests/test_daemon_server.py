@@ -135,6 +135,43 @@ class DaemonServerTest(unittest.TestCase):
         self.assertEqual(error.exception.code, 503)
         self.assertEqual(response["error_code"], "ask_retryable_after_send")
 
+    def test_mutating_routes_reject_when_daemon_is_not_serving(self) -> None:
+        settings = Settings(
+            app_id="cli_demo",
+            app_secret="secret_demo",
+            owner_open_id="ou_demo",
+        )
+
+        def send_text_handler(payload: dict[str, object]) -> dict[str, object]:
+            return {"ok": True, "message_id": "om_123", "receive_id": "ou_demo"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            daemon = SharedLongConnDaemonServer(
+                settings,
+                Path(tmpdir),
+                send_handlers={"/v1/send_text_message": send_text_handler},
+                status_provider=lambda: {"daemon_state": "retiring_idle"},
+            )
+            thread = daemon.start_background()
+            self.addCleanup(daemon.shutdown)
+            self.addCleanup(thread.join, 1)
+
+            with self.assertRaises(HTTPError) as error:
+                self._post_json(
+                    f"http://127.0.0.1:{daemon.metadata.port}/v1/send_text_message",
+                    token=daemon.token,
+                    payload={
+                        "text": "hello",
+                        "receive_id_type": "open_id",
+                        "receive_id": "ou_demo",
+                    },
+                )
+
+            response = json.loads(error.exception.read().decode("utf-8"))
+
+        self.assertEqual(error.exception.code, 503)
+        self.assertEqual(response["error_code"], "daemon_not_serving")
+
     def test_health_and_status_reflect_terminal_daemon_state(self) -> None:
         settings = Settings(
             app_id="cli_demo",
@@ -233,6 +270,121 @@ class DaemonServerTest(unittest.TestCase):
             self.assertTrue(response["ok"])
             self.assertEqual(response["daemon_epoch"], daemon.metadata.daemon_epoch)
 
+    def test_authorized_requests_notify_request_callbacks(self) -> None:
+        settings = Settings(
+            app_id="cli_demo",
+            app_secret="secret_demo",
+            owner_open_id="ou_demo",
+        )
+        started: list[str] = []
+        finished: list[str] = []
+
+        def send_text_handler(payload: dict[str, object]) -> dict[str, object]:
+            return {"ok": True, "message_id": "om_123", "receive_id": "ou_demo"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            daemon = SharedLongConnDaemonServer(
+                settings,
+                Path(tmpdir),
+                send_handlers={"/v1/send_text_message": send_text_handler},
+                on_request_started=started.append,
+                on_request_finished=finished.append,
+            )
+            thread = daemon.start_background()
+            self.addCleanup(daemon.shutdown)
+            self.addCleanup(thread.join, 1)
+
+            self._fetch_json(
+                f"http://127.0.0.1:{daemon.metadata.port}/v1/health",
+                token=daemon.token,
+            )
+            self._fetch_json(
+                f"http://127.0.0.1:{daemon.metadata.port}/v1/status",
+                token=daemon.token,
+            )
+            self._post_json(
+                f"http://127.0.0.1:{daemon.metadata.port}/v1/send_text_message",
+                token=daemon.token,
+                payload={
+                    "text": "hello",
+                    "receive_id_type": "open_id",
+                    "receive_id": "ou_demo",
+                },
+            )
+
+            with self.assertRaises(HTTPError):
+                urlopen(f"http://127.0.0.1:{daemon.metadata.port}/v1/health", timeout=1)
+
+        self.assertEqual(started, ["/v1/health", "/v1/status", "/v1/send_text_message"])
+        self.assertEqual(finished, started)
+
+    def test_bootstrap_probe_health_does_not_notify_request_callbacks(self) -> None:
+        settings = Settings(
+            app_id="cli_demo",
+            app_secret="secret_demo",
+            owner_open_id="ou_demo",
+        )
+        started: list[str] = []
+        finished: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            daemon = SharedLongConnDaemonServer(
+                settings,
+                Path(tmpdir),
+                on_request_started=started.append,
+                on_request_finished=finished.append,
+            )
+            thread = daemon.start_background()
+            self.addCleanup(daemon.shutdown)
+            self.addCleanup(thread.join, 1)
+
+            self._fetch_json(
+                f"http://127.0.0.1:{daemon.metadata.port}/v1/health",
+                token=daemon.token,
+                extra_headers={"X-Daemon-Probe": "bootstrap"},
+            )
+
+        self.assertEqual(started, [])
+        self.assertEqual(finished, [])
+
+    def test_bootstrap_probe_header_does_not_suppress_post_activity_tracking(self) -> None:
+        settings = Settings(
+            app_id="cli_demo",
+            app_secret="secret_demo",
+            owner_open_id="ou_demo",
+        )
+        started: list[str] = []
+        finished: list[str] = []
+
+        def send_text_handler(payload: dict[str, object]) -> dict[str, object]:
+            return {"ok": True, "message_id": "om_123", "receive_id": "ou_demo"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            daemon = SharedLongConnDaemonServer(
+                settings,
+                Path(tmpdir),
+                send_handlers={"/v1/send_text_message": send_text_handler},
+                on_request_started=started.append,
+                on_request_finished=finished.append,
+            )
+            thread = daemon.start_background()
+            self.addCleanup(daemon.shutdown)
+            self.addCleanup(thread.join, 1)
+
+            self._post_json(
+                f"http://127.0.0.1:{daemon.metadata.port}/v1/send_text_message",
+                token=daemon.token,
+                payload={
+                    "text": "hello",
+                    "receive_id_type": "open_id",
+                    "receive_id": "ou_demo",
+                },
+                extra_headers={"X-Daemon-Probe": "bootstrap"},
+            )
+
+        self.assertEqual(started, ["/v1/send_text_message"])
+        self.assertEqual(finished, ["/v1/send_text_message"])
+
     def test_cleanup_only_removes_its_own_runtime_files(self) -> None:
         settings = Settings(
             app_id="cli_demo",
@@ -256,19 +408,38 @@ class DaemonServerTest(unittest.TestCase):
             self.assertEqual(metadata.daemon_epoch, second.metadata.daemon_epoch)
             self.assertEqual(token, second.token)
 
-    def _fetch_json(self, url: str, *, token: str) -> dict[str, object]:
-        request = Request(url, headers={"Authorization": f"Bearer {token}"})
+    def _fetch_json(
+        self,
+        url: str,
+        *,
+        token: str,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        headers = {"Authorization": f"Bearer {token}"}
+        if extra_headers:
+            headers.update(extra_headers)
+        request = Request(url, headers=headers)
         with urlopen(request, timeout=1) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    def _post_json(self, url: str, *, token: str, payload: dict[str, object]) -> dict[str, object]:
+    def _post_json(
+        self,
+        url: str,
+        *,
+        token: str,
+        payload: dict[str, object],
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        if extra_headers:
+            headers.update(extra_headers)
         request = Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
         with urlopen(request, timeout=1) as response:

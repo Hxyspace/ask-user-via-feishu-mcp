@@ -20,6 +20,9 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.ask_timeout_seconds, 600)
         self.assertEqual(settings.ask_timeout_reminder_text, "请及时回复！！！")
         self.assertTrue(settings.reaction_enabled)
+        self.assertEqual(settings.daemon_idle_timeout_seconds, 600)
+        self.assertEqual(settings.daemon_idle_check_interval_seconds, 10)
+        self.assertEqual(settings.daemon_min_uptime_seconds, 60)
 
     def test_runtime_config_populates_owner_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -66,6 +69,41 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(from_config.chat_id, "oc_from_config")
         self.assertEqual(from_env.chat_id, "oc_from_env")
 
+    def test_daemon_idle_settings_can_come_from_runtime_config_and_be_overridden_by_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "app_id": "cli_cfg",
+                        "app_secret": "secret_cfg",
+                        "owner_open_id": "ou_owner",
+                        "daemon": {
+                            "idle_timeout_seconds": 300,
+                            "idle_check_interval_seconds": 5,
+                            "min_uptime_seconds": 30,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            from_config = Settings.from_env({"RUNTIME_CONFIG_PATH": str(config_path)})
+            from_env = Settings.from_env(
+                {
+                    "RUNTIME_CONFIG_PATH": str(config_path),
+                    "DAEMON_IDLE_TIMEOUT_SECONDS": "600",
+                    "DAEMON_IDLE_CHECK_INTERVAL_SECONDS": "10",
+                    "DAEMON_MIN_UPTIME_SECONDS": "60",
+                }
+            )
+
+        self.assertEqual(from_config.daemon_idle_timeout_seconds, 300)
+        self.assertEqual(from_config.daemon_idle_check_interval_seconds, 5)
+        self.assertEqual(from_config.daemon_min_uptime_seconds, 30)
+        self.assertEqual(from_env.daemon_idle_timeout_seconds, 600)
+        self.assertEqual(from_env.daemon_idle_check_interval_seconds, 10)
+        self.assertEqual(from_env.daemon_min_uptime_seconds, 60)
+
     def test_empty_timeout_default_answer_env_is_preserved(self) -> None:
         settings = Settings.from_env(
             {
@@ -111,3 +149,16 @@ class SettingsTest(unittest.TestCase):
         )
 
         settings.validate()
+
+    def test_validate_rejects_non_positive_daemon_idle_timeout(self) -> None:
+        settings = Settings.from_env(
+            {
+                "APP_ID": "cli_123",
+                "APP_SECRET": "secret_123",
+                "OWNER_OPEN_ID": "ou_owner",
+                "DAEMON_IDLE_TIMEOUT_SECONDS": "0",
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "DAEMON_IDLE_TIMEOUT_SECONDS must be greater than 0"):
+            settings.validate()

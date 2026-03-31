@@ -12,5 +12,10 @@
     "reminder_max_attempts": 10,
     "timeout_reminder_text": "请及时回复！！！",
     "timeout_default_answer": "[AUTO_RECALL]"
+  },
+  "daemon": {
+    "idle_timeout_seconds": 600,
+    "idle_check_interval_seconds": 10,
+    "min_uptime_seconds": 60
   }
 }

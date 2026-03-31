@@ -17,6 +17,7 @@ from ask_user_via_feishu.daemon.server import SharedLongConnDaemonServer
 
 class SharedLongConnDaemonApp:
     def __init__(self, settings: Settings, *, runtime_dir: Path | None = None) -> None:
+        self._settings = settings
         target_runtime_dir = runtime_dir_for_settings(settings) if runtime_dir is None else runtime_dir.expanduser().resolve()
         self._runtime_dir = target_runtime_dir
         self._daemon_state = "serving"
@@ -24,6 +25,12 @@ class SharedLongConnDaemonApp:
         self._lifecycle_lock = threading.Lock()
         self._retirement_thread: threading.Thread | None = None
         self._terminal_shutdown_delay_seconds = 1.0
+        current_time = time.monotonic()
+        self._started_at_monotonic = current_time
+        self._last_client_activity_at = current_time
+        self._in_flight_request_count = 0
+        self._idle_watcher_thread: threading.Thread | None = None
+        self._idle_watcher_stop_event = threading.Event()
         self._message_service = build_message_service(settings)
         event_processor = build_event_processor(settings)
         shared_runtime = FeishuSharedLongConnectionRuntime(
@@ -50,11 +57,18 @@ class SharedLongConnDaemonApp:
                 "/v1/send_post_message": self._send_post_message,
             },
             status_provider=self._status,
+            on_request_started=self._record_request_started,
+            on_request_finished=self._record_request_finished,
         )
 
     def serve_forever(self) -> None:
         self.initialize()
-        self._server.serve_forever()
+        self._mark_serving_started()
+        self._start_idle_watcher()
+        try:
+            self._server.serve_forever()
+        finally:
+            self._stop_idle_watcher()
 
     def initialize(self) -> None:
         if self._initialized:
@@ -105,6 +119,66 @@ class SharedLongConnDaemonApp:
             "pending_question_id": self._shared_runtime.current_pending_question_id(),
             **ask_status,
         }
+
+    def _record_request_started(self, _path: str) -> None:
+        current_time = time.monotonic()
+        with self._lifecycle_lock:
+            self._last_client_activity_at = current_time
+            self._in_flight_request_count += 1
+
+    def _mark_serving_started(self, *, now_monotonic: float | None = None) -> None:
+        current_time = time.monotonic() if now_monotonic is None else now_monotonic
+        with self._lifecycle_lock:
+            self._started_at_monotonic = current_time
+            self._last_client_activity_at = current_time
+
+    def _record_request_finished(self, _path: str) -> None:
+        current_time = time.monotonic()
+        with self._lifecycle_lock:
+            if self._in_flight_request_count > 0:
+                self._in_flight_request_count -= 1
+            self._last_client_activity_at = current_time
+
+    def _start_idle_watcher(self) -> None:
+        with self._lifecycle_lock:
+            if self._idle_watcher_thread is not None and self._idle_watcher_thread.is_alive():
+                return
+            self._idle_watcher_stop_event.clear()
+            self._idle_watcher_thread = threading.Thread(target=self._run_idle_watcher, daemon=True)
+            self._idle_watcher_thread.start()
+
+    def _stop_idle_watcher(self) -> None:
+        self._idle_watcher_stop_event.set()
+        thread = self._idle_watcher_thread
+        if thread is None or not thread.is_alive() or thread is threading.current_thread():
+            return
+        thread.join(timeout=1)
+
+    def _run_idle_watcher(self) -> None:
+        while not self._idle_watcher_stop_event.wait(self._settings.daemon_idle_check_interval_seconds):
+            self._maybe_retire_for_idle()
+
+    def _maybe_retire_for_idle(self, *, now_monotonic: float | None = None) -> bool:
+        if self._shared_runtime.has_pending_question():
+            return False
+        current_time = time.monotonic() if now_monotonic is None else now_monotonic
+        with self._lifecycle_lock:
+            if self._daemon_state != "serving":
+                return False
+            if self._in_flight_request_count != 0:
+                return False
+            if current_time - self._started_at_monotonic < self._settings.daemon_min_uptime_seconds:
+                return False
+            if current_time - self._last_client_activity_at < self._settings.daemon_idle_timeout_seconds:
+                return False
+            self._daemon_state = "retiring_idle"
+        try:
+            self._server.shutdown()
+        finally:
+            with self._lifecycle_lock:
+                if self._daemon_state == "retiring_idle":
+                    self._daemon_state = "shutting_down"
+        return True
 
     @staticmethod
     def _common_send_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
@@ -170,7 +244,7 @@ class SharedLongConnDaemonApp:
         failure_reason = str(exc).strip() or exc.__class__.__name__
         should_schedule = False
         with self._lifecycle_lock:
-            if self._daemon_state in {"terminal_failed", "shutting_down"}:
+            if self._daemon_state in {"terminal_failed", "retiring_idle", "shutting_down"}:
                 return
             self._daemon_state = "terminal_failed"
             self._failure_reason = failure_reason

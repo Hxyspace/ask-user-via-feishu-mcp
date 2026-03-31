@@ -24,6 +24,7 @@
 - **标准 MCP 工具接口**：默认暴露 5 个工具，便于 MCP Host 直接调用。
 - **双向交互**：既能主动发消息，也能等待飞书侧用户回复。
 - **共享长连接运行时**：`ask_user_via_feishu` 使用共享长连接监听飞书事件，避免每次提问都单独建立事件通道。
+- **共享 daemon 空闲退出**：共享 daemon 在一段时间没有 MCP 客户端请求后可健康退出；后续 ask/send 会自动拉起新的 daemon。
 - **卡片按钮选择**：提问时可附带选项，飞书侧会渲染交互卡片按钮。
 - **会话目标切换**：可通过静态 `CHAT_ID` 直接路由到群聊；未配置时，首次 send/ask 会先在 owner 当前会话里弹出一张 1.0 结构的选群卡片，支持点击切回当前会话、选择已发现群聊，或在卡片中输入群名后新建群聊。
 - **资源回传下载**：用户如果回复图片或文件，服务会以流式写盘方式下载到共享 daemon runtime 目录下的 `attachments/YYYY-MM-DD/` 目录，并在返回结果中给出本地路径。
@@ -188,6 +189,9 @@ python -m ask_user_via_feishu
 | `ASK_REMINDER_MAX_ATTEMPTS` | 否 | `10` | 超时后最多提醒次数 |
 | `ASK_TIMEOUT_REMINDER_TEXT` | 否 | `请及时回复！！！` | 超时提醒文案 |
 | `ASK_TIMEOUT_DEFAULT_ANSWER` | 否 | `[AUTO_RECALL]` | 超时后的默认返回值；留空则返回 `timeout` |
+| `DAEMON_IDLE_TIMEOUT_SECONDS` | 否 | `600` | 共享 daemon 在多久没有 MCP 请求后进入健康空闲退出 |
+| `DAEMON_IDLE_CHECK_INTERVAL_SECONDS` | 否 | `10` | 共享 daemon 检查空闲退出条件的轮询间隔 |
+| `DAEMON_MIN_UPTIME_SECONDS` | 否 | `60` | 共享 daemon 启动后至少存活多久才允许被空闲退出 |
 
 ### 运行时 JSON 配置
 
@@ -208,11 +212,16 @@ python -m ask_user_via_feishu
     "reminder_max_attempts": 10,
     "timeout_reminder_text": "请及时回复！！！",
     "timeout_default_answer": "[AUTO_RECALL]"
+  },
+  "daemon": {
+    "idle_timeout_seconds": 600,
+    "idle_check_interval_seconds": 10,
+    "min_uptime_seconds": 60
   }
 }
 ```
 
-启动前至少要保证 `APP_ID`、`APP_SECRET` 和 `OWNER_OPEN_ID` 最终可被解析到，否则服务会在启动校验阶段报错。`CHAT_ID` 是可选项：配置后会直接把后续 send/ask 路由到该会话；不配置则在第一次 send/ask 时，通过 owner 当前 P2P 会话弹卡选择目标。
+启动前至少要保证 `APP_ID`、`APP_SECRET` 和 `OWNER_OPEN_ID` 最终可被解析到，否则服务会在启动校验阶段报错。`CHAT_ID` 是可选项：配置后会直接把后续 send/ask 路由到该会话；不配置则在第一次 send/ask 时，通过 owner 当前 P2P 会话弹卡选择目标。`daemon.*` 配置用于控制共享 daemon 的健康空闲退出；daemon 退出后，后续 ask/send 会自动重新拉起。
 
 ## 🔧 MCP 工具
 
@@ -233,6 +242,8 @@ python -m ask_user_via_feishu
 - 选定目标后，向当前激活会话发送问题卡片；
 - 可选附带按钮选项；
 - 后台等待 owner 在该目标会话中的下一条文本回复、卡片按钮操作，或资源消息；
+- 不同目标 chat 上的 ordinary ask 可以并行进行；同一个目标 chat 上的 ordinary ask 会进入 FIFO queue；
+- target selection bootstrap 不进入 ordinary ask queue；
 - 如果回复包含图片/文件，会以流式方式自动下载到共享 daemon runtime 目录；
 - 返回结构中包含 `status`、`user_answer`、`downloaded_paths`。
 
@@ -241,7 +252,9 @@ python -m ask_user_via_feishu
 - 若达到超时阈值，会按配置发送提醒消息；
 - 若 `ASK_TIMEOUT_DEFAULT_ANSWER="[AUTO_RECALL]"`，会返回一段提示文案，通知上层 LLM 重新发起同一个问题；
 - 若 `ASK_TIMEOUT_DEFAULT_ANSWER=""`，则返回 `status: "timeout"`；
-- 不支持同一 owner 并发等待多个 pending question。
+- 不同 chat 上的 ordinary ask 可以并行等待；
+- 同一 chat 同时只会有一个 active ordinary ask，其余 ask 按 FIFO 排队；
+- target selection bootstrap 不占 ordinary ask 的 delivery queue。
 
 ## 📥 回复资源文件时的行为
 
@@ -315,9 +328,9 @@ python -m build
 
 - 这是一个 **owner-only** 服务，不适用于多人共享机器人场景。
 - 当前只允许配置的 owner 作为合法回复 actor；即使 send/ask 路由到了群聊，也不会接受其他成员的回答。
-- 只支持全局单 pending ask；暂不支持不同群聊上的并发 ask / queue。
 - 未配置 `CHAT_ID` 时，激活目标只保存在当前 MCP 进程内存中；进程重启后需要重新选择。
-- 同一 `OWNER_OPEN_ID` 同时只能存在一个 pending question。
+- 虽然不同 chat 上的 ordinary ask 已可并行、同一 chat 已支持 FIFO queue，但 ask queue 与 pending 状态仍不跨 daemon 重启持久化。
+- 同一 chat 在任一时刻仍只会有一个 active ordinary ask；后续 ask 需要排队。
 - 项目默认运行模式是 stdio MCP Server。
 
 ## 📄 许可证

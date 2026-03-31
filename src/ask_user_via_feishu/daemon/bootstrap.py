@@ -101,7 +101,10 @@ def _try_load_healthy_daemon(runtime_dir: Path, settings: Settings) -> DaemonCon
 def _fetch_health(metadata: DaemonMetadata, token: str) -> dict[str, object] | None:
     request = Request(
         f"http://127.0.0.1:{metadata.port}/v1/health",
-        headers={"Authorization": f"Bearer {token}"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Daemon-Probe": "bootstrap",
+        },
         method="GET",
     )
     try:
@@ -144,6 +147,9 @@ def _spawn_daemon_process(runtime_dir: Path, settings: Settings) -> None:
             "ASK_REMINDER_MAX_ATTEMPTS": str(settings.ask_reminder_max_attempts),
             "ASK_TIMEOUT_REMINDER_TEXT": settings.ask_timeout_reminder_text,
             "ASK_TIMEOUT_DEFAULT_ANSWER": settings.ask_timeout_default_answer,
+            "DAEMON_IDLE_TIMEOUT_SECONDS": str(settings.daemon_idle_timeout_seconds),
+            "DAEMON_IDLE_CHECK_INTERVAL_SECONDS": str(settings.daemon_idle_check_interval_seconds),
+            "DAEMON_MIN_UPTIME_SECONDS": str(settings.daemon_min_uptime_seconds),
         }
     )
     kwargs: dict[str, object] = {

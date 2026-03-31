@@ -108,6 +108,9 @@ def build_compatibility_hash(settings: Settings) -> str:
         "base_url": settings.base_url.strip(),
         "reaction_enabled": bool(settings.reaction_enabled),
         "reaction_emoji_type": settings.reaction_emoji_type.strip(),
+        "daemon_idle_timeout_seconds": int(settings.daemon_idle_timeout_seconds),
+        "daemon_idle_check_interval_seconds": int(settings.daemon_idle_check_interval_seconds),
+        "daemon_min_uptime_seconds": int(settings.daemon_min_uptime_seconds),
     }
     return _sha256_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 

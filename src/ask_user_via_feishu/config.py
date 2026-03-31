@@ -31,6 +31,9 @@ class Settings:
     ask_reminder_max_attempts: int = 10
     ask_timeout_reminder_text: str = "请及时回复！！！"
     ask_timeout_default_answer: str = "[AUTO_RECALL]"
+    daemon_idle_timeout_seconds: int = 600
+    daemon_idle_check_interval_seconds: int = 10
+    daemon_min_uptime_seconds: int = 60
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -104,6 +107,21 @@ class Settings:
                 default="[AUTO_RECALL]",
                 allow_empty=True,
             ),
+            daemon_idle_timeout_seconds=_resolve_int(
+                env.get("DAEMON_IDLE_TIMEOUT_SECONDS"),
+                _get_config_value(runtime_config, ("daemon", "idle_timeout_seconds")),
+                default=600,
+            ),
+            daemon_idle_check_interval_seconds=_resolve_int(
+                env.get("DAEMON_IDLE_CHECK_INTERVAL_SECONDS"),
+                _get_config_value(runtime_config, ("daemon", "idle_check_interval_seconds")),
+                default=10,
+            ),
+            daemon_min_uptime_seconds=_resolve_int(
+                env.get("DAEMON_MIN_UPTIME_SECONDS"),
+                _get_config_value(runtime_config, ("daemon", "min_uptime_seconds")),
+                default=60,
+            ),
         )
 
     def redacted(self) -> dict[str, Any]:
@@ -122,6 +140,9 @@ class Settings:
             "ask_reminder_max_attempts": self.ask_reminder_max_attempts,
             "ask_timeout_reminder_text": self.ask_timeout_reminder_text,
             "ask_timeout_default_answer": self.ask_timeout_default_answer,
+            "daemon_idle_timeout_seconds": self.daemon_idle_timeout_seconds,
+            "daemon_idle_check_interval_seconds": self.daemon_idle_check_interval_seconds,
+            "daemon_min_uptime_seconds": self.daemon_min_uptime_seconds,
         }
 
     def validate(self) -> None:
@@ -133,6 +154,12 @@ class Settings:
             raise ValueError("OWNER_OPEN_ID is required for this owner-only MCP server.")
         if self.api_timeout_seconds <= 0:
             raise ValueError("API_TIMEOUT_SECONDS must be greater than 0.")
+        if self.daemon_idle_timeout_seconds <= 0:
+            raise ValueError("DAEMON_IDLE_TIMEOUT_SECONDS must be greater than 0.")
+        if self.daemon_idle_check_interval_seconds <= 0:
+            raise ValueError("DAEMON_IDLE_CHECK_INTERVAL_SECONDS must be greater than 0.")
+        if self.daemon_min_uptime_seconds < 0:
+            raise ValueError("DAEMON_MIN_UPTIME_SECONDS must be greater than or equal to 0.")
 
 
 

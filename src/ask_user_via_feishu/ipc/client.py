@@ -36,6 +36,10 @@ class SharedLongConnDaemonClient:
         if response.status_code >= 400:
             error = str(data.get("error") or f"daemon request failed with status {response.status_code}")
             error_code = str(data.get("error_code") or "")
+            if error_code == "daemon_not_serving":
+                if path == "/v1/ask_and_wait":
+                    raise DaemonAskRetryableError(error, retry_stage="before_send")
+                raise DaemonTransportError(error)
             if error_code.startswith("ask_retryable_"):
                 raise DaemonAskRetryableError(
                     error,

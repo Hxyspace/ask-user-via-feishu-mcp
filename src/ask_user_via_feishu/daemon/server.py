@@ -7,7 +7,6 @@ import secrets
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import secrets
 import threading
 from typing import Any, Callable
 import uuid
@@ -42,6 +41,8 @@ class SharedLongConnDaemonServer:
         ask_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         send_handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
         status_provider: Callable[[], dict[str, Any]] | None = None,
+        on_request_started: Callable[[str], None] | None = None,
+        on_request_finished: Callable[[str], None] | None = None,
     ) -> None:
         self._settings = settings
         self._runtime_dir = ensure_runtime_dir(runtime_dir)
@@ -52,6 +53,8 @@ class SharedLongConnDaemonServer:
         self._ask_handler = ask_handler
         self._send_handlers = dict(send_handlers or {})
         self._status_provider = status_provider
+        self._on_request_started = on_request_started
+        self._on_request_finished = on_request_finished
         self._server = ThreadingHTTPServer((DAEMON_HOST, 0), self._build_handler())
         self._server.daemon_threads = True
         self._server.timeout = 0.5
@@ -143,98 +146,123 @@ class SharedLongConnDaemonServer:
         if not self._is_authorized(handler):
             self._send_json(handler, HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
-
-        if handler.path == "/v1/health":
-            status_payload = self._status_provider() if self._status_provider is not None else {}
-            long_connection_state = str(status_payload.get("long_connection_state") or "stopped")
-            daemon_state = str(status_payload.get("daemon_state") or "serving")
-            self._send_json(
-                handler,
-                HTTPStatus.OK,
-                {
-                    "ok": True,
-                    "ready": daemon_state == "serving" and long_connection_state != "failed",
-                    "service": SERVER_NAME,
-                    "version": SERVER_VERSION,
-                    "protocol_version": self._metadata.protocol_version,
-                    "daemon_epoch": self._daemon_epoch,
-                    "daemon_state": daemon_state,
-                    "long_connection_state": long_connection_state,
-                },
-            )
-            return
-
-        if handler.path == "/v1/status":
-            status_payload = self._status_provider() if self._status_provider is not None else {}
-            self._send_json(
-                handler,
-                HTTPStatus.OK,
-                {
-                    "ok": True,
-                    "protocol_version": self._metadata.protocol_version,
-                    "daemon_epoch": self._daemon_epoch,
-                    "daemon_state": str(status_payload.get("daemon_state") or "serving"),
-                    "failure_reason": str(status_payload.get("failure_reason") or ""),
-                    "long_connection_state": str(status_payload.get("long_connection_state") or "stopped"),
-                    "pending_ask": bool(status_payload.get("pending_ask") or False),
-                    "pending_question_id": str(status_payload.get("pending_question_id") or ""),
-                    "active_ask_count": int(status_payload.get("active_ask_count") or 0),
-                    "queued_ask_count": int(status_payload.get("queued_ask_count") or 0),
-                    "queues_by_target": list(status_payload.get("queues_by_target") or []),
-                    "queue_exempt_question_ids": list(status_payload.get("queue_exempt_question_ids") or []),
-                    "identity": {
-                        "app_id": self._settings.app_id.strip(),
+        track_activity = self._should_track_request_activity(handler)
+        if track_activity:
+            self._notify_request_started(handler.path)
+        try:
+            if handler.path == "/v1/health":
+                status_payload = self._status_provider() if self._status_provider is not None else {}
+                long_connection_state = str(status_payload.get("long_connection_state") or "stopped")
+                daemon_state = str(status_payload.get("daemon_state") or "serving")
+                self._send_json(
+                    handler,
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "ready": daemon_state == "serving" and long_connection_state != "failed",
+                        "service": SERVER_NAME,
+                        "version": SERVER_VERSION,
+                        "protocol_version": self._metadata.protocol_version,
+                        "daemon_epoch": self._daemon_epoch,
+                        "daemon_state": daemon_state,
+                        "long_connection_state": long_connection_state,
                     },
-                },
-            )
-            return
+                )
+                return
 
-        self._send_json(handler, HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
+            if handler.path == "/v1/status":
+                status_payload = self._status_provider() if self._status_provider is not None else {}
+                self._send_json(
+                    handler,
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "protocol_version": self._metadata.protocol_version,
+                        "daemon_epoch": self._daemon_epoch,
+                        "daemon_state": str(status_payload.get("daemon_state") or "serving"),
+                        "failure_reason": str(status_payload.get("failure_reason") or ""),
+                        "long_connection_state": str(status_payload.get("long_connection_state") or "stopped"),
+                        "pending_ask": bool(status_payload.get("pending_ask") or False),
+                        "pending_question_id": str(status_payload.get("pending_question_id") or ""),
+                        "active_ask_count": int(status_payload.get("active_ask_count") or 0),
+                        "queued_ask_count": int(status_payload.get("queued_ask_count") or 0),
+                        "queues_by_target": list(status_payload.get("queues_by_target") or []),
+                        "queue_exempt_question_ids": list(status_payload.get("queue_exempt_question_ids") or []),
+                        "identity": {
+                            "app_id": self._settings.app_id.strip(),
+                        },
+                    },
+                )
+                return
+
+            self._send_json(handler, HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
+        finally:
+            if track_activity:
+                self._notify_request_finished(handler.path)
 
     def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         if not self._is_authorized(handler):
             self._send_json(handler, HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
-        route_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None
-        if handler.path == "/v1/ask_and_wait":
-            route_handler = self._ask_handler
-        else:
-            route_handler = self._send_handlers.get(handler.path)
-        if route_handler is None:
-            self._send_json(handler, HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
-            return
+        track_activity = self._should_track_request_activity(handler)
         try:
-            request_payload = self._read_json_body(handler)
-            response_payload = route_handler(request_payload)
-        except ValueError as exc:
-            status = HTTPStatus.CONFLICT if "already exists" in str(exc) else HTTPStatus.BAD_REQUEST
-            self._send_json(handler, status, {"ok": False, "error": str(exc)})
-            return
-        except MessageValidationError as exc:
-            self._send_json(handler, HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
-            return
-        except FeishuAPIError as exc:
-            self._send_json(handler, HTTPStatus.BAD_GATEWAY, {"ok": False, "error": str(exc)})
-            return
-        except RetryableAskError as exc:
-            self._send_json(
-                handler,
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                {
-                    "ok": False,
-                    "error": str(exc),
-                    "error_code": f"ask_retryable_{exc.retry_stage}",
-                },
-            )
-            return
-        except RuntimeError as exc:
-            self._send_json(handler, HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
-            return
-        if "protocol_version" not in response_payload:
-            response_payload["protocol_version"] = self._metadata.protocol_version
-        if "daemon_epoch" not in response_payload:
-            response_payload["daemon_epoch"] = self._daemon_epoch
-        self._send_json(handler, HTTPStatus.OK, response_payload)
+            if track_activity:
+                self._notify_request_started(handler.path)
+            route_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+            if handler.path == "/v1/ask_and_wait":
+                route_handler = self._ask_handler
+            else:
+                route_handler = self._send_handlers.get(handler.path)
+            if route_handler is None:
+                self._send_json(handler, HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
+                return
+            daemon_state, detail = self._mutating_request_state()
+            if daemon_state != "serving":
+                self._send_json(
+                    handler,
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {
+                        "ok": False,
+                        "error": f"Shared daemon is not accepting new requests: {detail}",
+                        "error_code": "daemon_not_serving",
+                    },
+                )
+                return
+            try:
+                request_payload = self._read_json_body(handler)
+                response_payload = route_handler(request_payload)
+            except ValueError as exc:
+                status = HTTPStatus.CONFLICT if "already exists" in str(exc) else HTTPStatus.BAD_REQUEST
+                self._send_json(handler, status, {"ok": False, "error": str(exc)})
+                return
+            except MessageValidationError as exc:
+                self._send_json(handler, HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+                return
+            except FeishuAPIError as exc:
+                self._send_json(handler, HTTPStatus.BAD_GATEWAY, {"ok": False, "error": str(exc)})
+                return
+            except RetryableAskError as exc:
+                self._send_json(
+                    handler,
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "error_code": f"ask_retryable_{exc.retry_stage}",
+                    },
+                )
+                return
+            except RuntimeError as exc:
+                self._send_json(handler, HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
+                return
+            if "protocol_version" not in response_payload:
+                response_payload["protocol_version"] = self._metadata.protocol_version
+            if "daemon_epoch" not in response_payload:
+                response_payload["daemon_epoch"] = self._daemon_epoch
+            self._send_json(handler, HTTPStatus.OK, response_payload)
+        finally:
+            if track_activity:
+                self._notify_request_finished(handler.path)
 
     def _is_authorized(self, handler: BaseHTTPRequestHandler) -> bool:
         authorization = str(handler.headers.get("Authorization") or "").strip()
@@ -261,3 +289,34 @@ class SharedLongConnDaemonServer:
         if not isinstance(payload, dict):
             raise ValueError("request body must be a JSON object")
         return payload
+
+    def _notify_request_started(self, path: str) -> None:
+        if self._on_request_started is None:
+            return
+        try:
+            self._on_request_started(path)
+        except Exception:  # pragma: no cover
+            logger.exception("Daemon request-start callback failed for path=%s", path)
+
+    def _notify_request_finished(self, path: str) -> None:
+        if self._on_request_finished is None:
+            return
+        try:
+            self._on_request_finished(path)
+        except Exception:  # pragma: no cover
+            logger.exception("Daemon request-finish callback failed for path=%s", path)
+
+    def _mutating_request_state(self) -> tuple[str, str]:
+        status_payload = self._status_provider() if self._status_provider is not None else {}
+        daemon_state = str(status_payload.get("daemon_state") or "serving")
+        failure_reason = str(status_payload.get("failure_reason") or "")
+        detail = failure_reason or f"daemon state is {daemon_state}"
+        return daemon_state, detail
+
+    @staticmethod
+    def _should_track_request_activity(handler: BaseHTTPRequestHandler) -> bool:
+        return not (
+            getattr(handler, "command", "").upper() == "GET"
+            and handler.path == "/v1/health"
+            and str(handler.headers.get("X-Daemon-Probe") or "").strip().lower() == "bootstrap"
+        )

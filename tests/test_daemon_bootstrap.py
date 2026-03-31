@@ -53,6 +53,25 @@ class DaemonBootstrapTest(unittest.TestCase):
             with self.assertRaises(DaemonCompatibilityError):
                 ensure_daemon_running(client_settings, base_dir=base_dir)
 
+    def test_ensure_daemon_running_rejects_live_daemon_with_different_idle_settings(self) -> None:
+        daemon_settings = Settings(app_id="cli_demo", app_secret="secret_demo", owner_open_id="ou_demo")
+        client_settings = Settings(
+            app_id="cli_demo",
+            app_secret="secret_demo",
+            owner_open_id="ou_demo",
+            daemon_idle_timeout_seconds=300,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            runtime_dir = runtime_dir_for_settings(daemon_settings, base_dir=base_dir)
+            daemon = SharedLongConnDaemonServer(daemon_settings, runtime_dir)
+            thread = daemon.start_background()
+            self.addCleanup(daemon.shutdown)
+            self.addCleanup(thread.join, 1)
+
+            with self.assertRaises(DaemonCompatibilityError):
+                ensure_daemon_running(client_settings, base_dir=base_dir)
+
     def test_ensure_daemon_running_spawns_and_waits_when_missing(self) -> None:
         settings = Settings(app_id="cli_demo", app_secret="secret_demo", owner_open_id="ou_demo")
         fake_connection = DaemonConnectionInfo(
@@ -137,6 +156,9 @@ class DaemonBootstrapTest(unittest.TestCase):
             ask_reminder_max_attempts=4,
             ask_timeout_reminder_text="reply soon",
             ask_timeout_default_answer="[AUTO_RECALL]",
+            daemon_idle_timeout_seconds=600,
+            daemon_idle_check_interval_seconds=10,
+            daemon_min_uptime_seconds=60,
         )
         with patch("ask_user_via_feishu.daemon.bootstrap.subprocess.Popen") as popen_mock:
             _spawn_daemon_process(Path("/tmp/daemon-runtime"), settings)
@@ -149,6 +171,9 @@ class DaemonBootstrapTest(unittest.TestCase):
         self.assertEqual(env["BASE_URL"], "https://example.test")
         self.assertEqual(env["REACTION_ENABLED"], "false")
         self.assertEqual(env["ASK_TIMEOUT_SECONDS"], "123")
+        self.assertEqual(env["DAEMON_IDLE_TIMEOUT_SECONDS"], "600")
+        self.assertEqual(env["DAEMON_IDLE_CHECK_INTERVAL_SECONDS"], "10")
+        self.assertEqual(env["DAEMON_MIN_UPTIME_SECONDS"], "60")
 
     def test_daemon_reuse_ignores_owner_open_id_when_app_identity_matches(self) -> None:
         daemon_settings = Settings(app_id="cli_demo", app_secret="secret_demo", owner_open_id="ou_a")
