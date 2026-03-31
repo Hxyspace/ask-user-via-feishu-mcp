@@ -249,6 +249,7 @@ class AskRuntimeTest(unittest.TestCase):
                 receive_id_type=kwargs.get("receive_id_type", "open_id"),
                 receive_id=kwargs.get("receive_id", settings.owner_open_id),
                 wait_options=build_wait_options(settings),
+                question_id=kwargs.get("question_id"),
                 card=kwargs.get("card"),
             )
         )
@@ -337,6 +338,23 @@ class AskRuntimeTest(unittest.TestCase):
             self._run_ask(settings, fake_service, FakeRejectPendingRuntime())
 
         self.assertEqual(fake_service.sent_interactive, [])
+
+    def test_target_selection_question_does_not_reserve_open_id_slot(self) -> None:
+        settings = self._settings(ASK_REMINDER_MAX_ATTEMPTS="0", ASK_TIMEOUT_DEFAULT_ANSWER="")
+        fake_service = FakeTimeoutMessageService()
+        runtime = FakeTimeoutRuntime()
+
+        result = self._run_ask(
+            settings,
+            fake_service,
+            runtime,
+            question_id="select_target_123",
+            card={"header": {"title": {"tag": "plain_text", "content": "选择会话"}}, "elements": []},
+        )
+
+        self.assertEqual(result["status"], "timeout")
+        self.assertEqual(runtime.registered_questions[0]["question_id"], "select_target_123")
+        self.assertFalse(runtime.registered_questions[0]["reserve_open_id_slot"])
 
     def test_unregisters_reserved_pending_when_send_fails(self) -> None:
         settings = self._settings()

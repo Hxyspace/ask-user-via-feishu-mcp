@@ -36,6 +36,7 @@ class PendingQuestion:
     target_open_id: str
     question: str
     question_message_id: str
+    reserve_open_id_slot: bool = True
     status: str = "pending_send"
     created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     sent_at_ms: int = 0
@@ -90,6 +91,7 @@ class FeishuSharedLongConnectionRuntime:
         target_open_id: str,
         question: str,
         question_message_id: str,
+        reserve_open_id_slot: bool = True,
     ) -> PendingQuestion:
         normalized_question_id = question_id.strip()
         normalized_open_id = target_open_id.strip()
@@ -99,7 +101,7 @@ class FeishuSharedLongConnectionRuntime:
             raise ValueError("target_open_id must not be empty.")
         with self._lock:
             existing = self._pending_by_open_id.get(normalized_open_id)
-            if existing is not None:
+            if reserve_open_id_slot and existing is not None:
                 raise ValueError(
                     "A pending Feishu question for this open_id already exists. Concurrent questions for the same user are not supported."
                 )
@@ -108,9 +110,11 @@ class FeishuSharedLongConnectionRuntime:
                 target_open_id=normalized_open_id,
                 question=question,
                 question_message_id=question_message_id,
+                reserve_open_id_slot=reserve_open_id_slot,
             )
             self._pending_by_question_id[normalized_question_id] = record
-            self._pending_by_open_id[normalized_open_id] = record
+            if reserve_open_id_slot:
+                self._pending_by_open_id[normalized_open_id] = record
             return record
 
     def mark_waiting_for_reply(
@@ -153,7 +157,7 @@ class FeishuSharedLongConnectionRuntime:
     def unregister_pending_question(self, question_id: str) -> None:
         with self._lock:
             record = self._pending_by_question_id.pop(question_id.strip(), None)
-            if record is not None:
+            if record is not None and record.reserve_open_id_slot:
                 self._pending_by_open_id.pop(record.target_open_id, None)
 
     def has_pending_question(self) -> bool:

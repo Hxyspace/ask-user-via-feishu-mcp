@@ -405,6 +405,71 @@ class LongConnectionTest(unittest.TestCase):
         self.assertEqual(result["message_type"], "card_action")
         self.assertEqual(response.toast.content, "已收到你的选择")
 
+    def test_shared_runtime_allows_target_selection_alongside_pending_ask(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_ask",
+        )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_ask",
+            sent_at_ms=1_000,
+            target_chat_id="oc_ask",
+        )
+        runtime.register_pending_question(
+            question_id="select_target_123",
+            target_open_id="ou_owner",
+            question="select",
+            question_message_id="om_select",
+            reserve_open_id_slot=False,
+        )
+        runtime.mark_waiting_for_reply(
+            "select_target_123",
+            question_message_id="om_select",
+            sent_at_ms=1_000,
+        )
+
+        selection_response = runtime.handle_event(
+            "card.action.trigger",
+            {
+                "operator": {"open_id": "ou_owner"},
+                "action": {
+                    "value": {
+                        "action": "feishu_select_chat_target",
+                        "question_id": "select_target_123",
+                        "selection_kind": "current_conversation",
+                    }
+                },
+                "context": {"open_message_id": "om_select", "open_chat_id": "oc_p2p"},
+            },
+        )
+        selection_result = runtime.wait_for_question("select_target_123", 1)
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply",
+                    "chat_id": "oc_ask",
+                    "chat_type": "group",
+                    "create_time": "1000",
+                    "message_type": "text",
+                    "content": '{"text":"hello ask"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+        ask_result = runtime.wait_for_question("ask_123", 1)
+
+        self.assertEqual(selection_result["text"], "current_conversation")
+        self.assertEqual(selection_result["message_type"], "card_action")
+        self.assertEqual(selection_response.toast.content, "已收到你的选择")
+        self.assertEqual(ask_result["text"], "hello ask")
+
     def test_shared_runtime_ignores_reply_before_question_is_waiting(self) -> None:
         processor = FakeEventProcessor()
         runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)

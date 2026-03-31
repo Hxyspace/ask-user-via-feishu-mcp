@@ -195,6 +195,7 @@ class AskRuntimeOrchestrator:
             target_open_id=target_open_id,
             question=question_text,
             question_message_id=question_message_id,
+            reserve_open_id_slot=not resolved_question_id.startswith("select_target_"),
         )
         try:
             send_result = await self._service.send_interactive(
