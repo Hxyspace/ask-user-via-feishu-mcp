@@ -209,6 +209,7 @@ def create_server(settings: Settings) -> FastMCP:
     enabled_mcp_tools = _resolve_enabled_mcp_tools()
     selected_target = _configured_chat_target(settings)
     target_lock = asyncio.Lock()
+    process_client_id = uuid_lib.uuid4().hex
 
     def tool_enabled(name: str) -> bool:
         return name in enabled_mcp_tools
@@ -240,6 +241,7 @@ def create_server(settings: Settings) -> FastMCP:
         wait_options: AskWaitOptions | None = None,
         question_id: str | None = None,
         card: dict[str, Any] | None = None,
+        client_request_id: str | None = None,
     ) -> dict[str, Any]:
         question_text = question.strip()
         if not question_text:
@@ -253,6 +255,7 @@ def create_server(settings: Settings) -> FastMCP:
         if not resolved_allowed_actor_open_id:
             raise ValueError("allowed_actor_open_id must not be empty.")
         request_uuid = str(uuid or "").strip() or None
+        resolved_client_request_id = str(client_request_id or uuid_lib.uuid4().hex).strip()
         retry_after_terminal_failure = False
         for attempt in range(2):
             try:
@@ -267,25 +270,33 @@ def create_server(settings: Settings) -> FastMCP:
                     allowed_actor_open_id=resolved_allowed_actor_open_id,
                     question_id=question_id,
                     card=card,
+                    client_id=process_client_id,
+                    client_request_id=resolved_client_request_id,
                 )
             except DaemonAskRetryableError as exc:
                 retry_after_terminal_failure = True
                 if attempt == 0:
                     logger.warning(
-                        "Shared daemon ask interrupted at stage=%s; retrying once on a fresh daemon.",
+                        "Shared daemon ask interrupted at stage=%s client_id=%s client_request_id=%s; retrying once on a fresh daemon.",
                         exc.retry_stage,
+                        process_client_id,
+                        resolved_client_request_id,
                     )
                     request_uuid = _build_retry_uuid(request_uuid, retry_stage=exc.retry_stage)
                     continue
                 logger.warning(
-                    "Shared daemon ask interrupted again at stage=%s; returning local ask fallback.",
+                    "Shared daemon ask interrupted again at stage=%s client_id=%s client_request_id=%s; returning local ask fallback.",
                     exc.retry_stage,
+                    process_client_id,
+                    resolved_client_request_id,
                 )
                 return _local_ask_fallback_result()
             except (DaemonBootstrapError, DaemonTransportError) as exc:
                 if retry_after_terminal_failure:
                     logger.warning(
-                        "Shared daemon ask retry could not reach a fresh daemon; returning local ask fallback: %s",
+                        "Shared daemon ask retry could not reach a fresh daemon client_id=%s client_request_id=%s; returning local ask fallback: %s",
+                        process_client_id,
+                        resolved_client_request_id,
                         exc,
                     )
                     return _local_ask_fallback_result()

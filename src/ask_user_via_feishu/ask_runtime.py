@@ -157,6 +157,8 @@ class AskRuntimeOrchestrator:
         allowed_actor_open_id: str | None = None,
         question_id: str | None = None,
         card: dict[str, Any] | None = None,
+        client_id: str | None = None,
+        client_request_id: str | None = None,
     ) -> dict[str, Any]:
         question_text = question.strip()
         if not question_text:
@@ -168,6 +170,8 @@ class AskRuntimeOrchestrator:
         target_open_id = (allowed_actor_open_id or self._settings.owner_open_id).strip()
         if not target_open_id:
             raise ValueError("allowed_actor_open_id must not be empty.")
+        resolved_client_id = str(client_id or "").strip()
+        resolved_client_request_id = str(client_request_id or "").strip()
         try:
             self._shared_runtime.ensure_started()
         except LongConnectionSetupError as exc:
@@ -199,6 +203,8 @@ class AskRuntimeOrchestrator:
             ask_kind=ask_kind,
             receive_id_type=resolved_receive_id_type,
             receive_id=resolved_receive_id,
+            client_id=resolved_client_id,
+            client_request_id=resolved_client_request_id,
             reserve_delivery_slot=ask_kind != "bootstrap_selection",
         )
         try:

@@ -512,7 +512,11 @@ class LongConnectionTest(unittest.TestCase):
                     "receive_id_type": "chat_id",
                     "receive_id": "oc_ask",
                     "active_question_id": "ask_123",
+                    "active_client_id": "",
+                    "active_client_request_id": "",
                     "queued_question_ids": [],
+                    "queued_client_ids": [],
+                    "queued_client_request_ids": [],
                 }
             ],
         )
@@ -627,7 +631,11 @@ class LongConnectionTest(unittest.TestCase):
                     "receive_id_type": "chat_id",
                     "receive_id": "oc_same_chat",
                     "active_question_id": "ask_123",
+                    "active_client_id": "",
+                    "active_client_request_id": "",
                     "queued_question_ids": ["ask_456"],
+                    "queued_client_ids": [""],
+                    "queued_client_request_ids": [""],
                 }
             ],
         )
@@ -673,7 +681,11 @@ class LongConnectionTest(unittest.TestCase):
                     "receive_id_type": "chat_id",
                     "receive_id": "oc_same_chat",
                     "active_question_id": "ask_456",
+                    "active_client_id": "",
+                    "active_client_request_id": "",
                     "queued_question_ids": [],
+                    "queued_client_ids": [],
+                    "queued_client_request_ids": [],
                 }
             ],
         )

@@ -50,6 +50,10 @@ class DaemonServerTest(unittest.TestCase):
             self.assertEqual(health["daemon_epoch"], daemon.metadata.daemon_epoch)
             self.assertEqual(status["identity"]["app_id"], "cli_demo")
             self.assertFalse(status["pending_ask"])
+            self.assertEqual(status["active_ask_count"], 0)
+            self.assertEqual(status["queued_ask_count"], 0)
+            self.assertEqual(status["queues_by_target"], [])
+            self.assertEqual(status["queue_exempt_question_ids"], [])
 
     def test_ask_and_wait_route_returns_handler_result(self) -> None:
         settings = Settings(
@@ -83,6 +87,8 @@ class DaemonServerTest(unittest.TestCase):
                     "choices": ["是", "否"],
                     "receive_id_type": "open_id",
                     "receive_id": "ou_demo",
+                    "client_id": "client_alpha",
+                    "client_request_id": "request_alpha",
                 },
             )
 
@@ -90,6 +96,8 @@ class DaemonServerTest(unittest.TestCase):
             self.assertEqual(captured_payload["choices"], ["是", "否"])
             self.assertEqual(captured_payload["receive_id_type"], "open_id")
             self.assertEqual(captured_payload["receive_id"], "ou_demo")
+            self.assertEqual(captured_payload["client_id"], "client_alpha")
+            self.assertEqual(captured_payload["client_request_id"], "request_alpha")
             self.assertEqual(response["status"], "answered")
             self.assertEqual(response["user_answer"], "done")
             self.assertEqual(response["daemon_epoch"], daemon.metadata.daemon_epoch)
@@ -141,6 +149,22 @@ class DaemonServerTest(unittest.TestCase):
                     "daemon_state": "terminal_failed",
                     "failure_reason": "ws failed",
                     "long_connection_state": "failed",
+                    "active_ask_count": 1,
+                    "queued_ask_count": 1,
+                    "queues_by_target": [
+                        {
+                            "delivery_key": "chat_id:oc_demo",
+                            "receive_id_type": "chat_id",
+                            "receive_id": "oc_demo",
+                            "active_question_id": "ask_123",
+                            "active_client_id": "client_alpha",
+                            "active_client_request_id": "request_alpha",
+                            "queued_question_ids": ["ask_456"],
+                            "queued_client_ids": ["client_beta"],
+                            "queued_client_request_ids": ["request_beta"],
+                        }
+                    ],
+                    "queue_exempt_question_ids": ["select_target_123"],
                 },
             )
             thread = daemon.start_background()
@@ -160,6 +184,10 @@ class DaemonServerTest(unittest.TestCase):
         self.assertEqual(health["daemon_state"], "terminal_failed")
         self.assertEqual(status["daemon_state"], "terminal_failed")
         self.assertEqual(status["failure_reason"], "ws failed")
+        self.assertEqual(status["active_ask_count"], 1)
+        self.assertEqual(status["queued_ask_count"], 1)
+        self.assertEqual(status["queues_by_target"][0]["active_client_id"], "client_alpha")
+        self.assertEqual(status["queue_exempt_question_ids"], ["select_target_123"])
 
     def test_send_text_route_returns_handler_result(self) -> None:
         settings = Settings(

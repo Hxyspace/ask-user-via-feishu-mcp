@@ -11,6 +11,7 @@ from typing import Any, Callable
 from ask_user_via_feishu.ask_state import (
     AskStatusSnapshot,
     DeliveryAskQueueState,
+    TargetQueueStatus,
     enqueue_ask,
     promote_next_ask,
     remove_ask,
@@ -47,6 +48,8 @@ class PendingQuestion:
     receive_id_type: str = "open_id"
     receive_id: str = ""
     delivery_key: str = ""
+    client_id: str = ""
+    client_request_id: str = ""
     reserve_delivery_slot: bool = True
     status: str = "pending_send"
     created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
@@ -106,6 +109,8 @@ class FeishuSharedLongConnectionRuntime:
         ask_kind: str = "ordinary",
         receive_id_type: str = "open_id",
         receive_id: str = "",
+        client_id: str = "",
+        client_request_id: str = "",
         reserve_delivery_slot: bool = True,
     ) -> PendingQuestion:
         normalized_question_id = question_id.strip()
@@ -113,6 +118,8 @@ class FeishuSharedLongConnectionRuntime:
         normalized_ask_kind = ask_kind.strip() or "ordinary"
         normalized_receive_id_type = receive_id_type.strip() or "open_id"
         normalized_receive_id = receive_id.strip() or normalized_open_id
+        normalized_client_id = client_id.strip()
+        normalized_client_request_id = client_request_id.strip()
         if not normalized_question_id:
             raise ValueError("question_id must not be empty.")
         if not normalized_open_id:
@@ -132,6 +139,8 @@ class FeishuSharedLongConnectionRuntime:
                 receive_id_type=normalized_receive_id_type,
                 receive_id=normalized_receive_id,
                 delivery_key=normalized_delivery_key,
+                client_id=normalized_client_id,
+                client_request_id=normalized_client_request_id,
                 reserve_delivery_slot=reserve_delivery_slot,
             )
             if reserve_delivery_slot:
@@ -257,15 +266,37 @@ class FeishuSharedLongConnectionRuntime:
     def ask_status_snapshot(self) -> AskStatusSnapshot:
         with self._lock:
             queue_states = list(self._ordinary_queue_by_delivery_key.values())
+            records_by_question_id = dict(self._pending_by_question_id)
             queue_exempt_question_ids = sorted(
                 record.question_id
-                for record in self._pending_by_question_id.values()
+                for record in records_by_question_id.values()
                 if record.ask_kind != "ordinary"
             )
         active_ask_count = sum(1 for queue_state in queue_states if queue_state.active_question_id)
         queued_ask_count = sum(len(queue_state.queued_question_ids) for queue_state in queue_states)
+
+        def _client_id_for(question_id: str) -> str:
+            record = records_by_question_id.get(question_id)
+            return "" if record is None else record.client_id
+
+        def _client_request_id_for(question_id: str) -> str:
+            record = records_by_question_id.get(question_id)
+            return "" if record is None else record.client_request_id
+
         queues_by_target = tuple(
-            queue_state.to_target_queue_status()
+            TargetQueueStatus(
+                delivery_key=queue_state.delivery_key,
+                receive_id_type=queue_state.receive_id_type,
+                receive_id=queue_state.receive_id,
+                active_question_id=queue_state.active_question_id,
+                active_client_id=_client_id_for(queue_state.active_question_id),
+                active_client_request_id=_client_request_id_for(queue_state.active_question_id),
+                queued_question_ids=queue_state.queued_question_ids,
+                queued_client_ids=tuple(_client_id_for(question_id) for question_id in queue_state.queued_question_ids),
+                queued_client_request_ids=tuple(
+                    _client_request_id_for(question_id) for question_id in queue_state.queued_question_ids
+                ),
+            )
             for queue_state in sorted(queue_states, key=lambda item: item.delivery_key)
         )
         return AskStatusSnapshot(

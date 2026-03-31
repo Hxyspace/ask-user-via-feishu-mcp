@@ -178,6 +178,10 @@ class SharedLongConnDaemonServer:
                     "long_connection_state": str(status_payload.get("long_connection_state") or "stopped"),
                     "pending_ask": bool(status_payload.get("pending_ask") or False),
                     "pending_question_id": str(status_payload.get("pending_question_id") or ""),
+                    "active_ask_count": int(status_payload.get("active_ask_count") or 0),
+                    "queued_ask_count": int(status_payload.get("queued_ask_count") or 0),
+                    "queues_by_target": list(status_payload.get("queues_by_target") or []),
+                    "queue_exempt_question_ids": list(status_payload.get("queue_exempt_question_ids") or []),
                     "identity": {
                         "app_id": self._settings.app_id.strip(),
                     },

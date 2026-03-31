@@ -60,6 +60,8 @@ class SharedLongConnDaemonClient:
         allowed_actor_open_id: str | None = None,
         question_id: str | None = None,
         card: dict[str, Any] | None = None,
+        client_id: str | None = None,
+        client_request_id: str | None = None,
     ) -> dict[str, Any]:
         payload = {
             "question": question,
@@ -74,6 +76,8 @@ class SharedLongConnDaemonClient:
             "allowed_actor_open_id": allowed_actor_open_id,
             "question_id": question_id,
             "card": card,
+            "client_id": client_id,
+            "client_request_id": client_request_id,
         }
         data = await self._post_json("/v1/ask_and_wait", payload)
         result = {

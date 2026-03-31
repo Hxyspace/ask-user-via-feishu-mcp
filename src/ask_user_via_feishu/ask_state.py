@@ -31,7 +31,11 @@ class TargetQueueStatus:
     receive_id_type: str
     receive_id: str
     active_question_id: str
+    active_client_id: str = ""
+    active_client_request_id: str = ""
     queued_question_ids: tuple[str, ...] = ()
+    queued_client_ids: tuple[str, ...] = ()
+    queued_client_request_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,7 +43,11 @@ class TargetQueueStatus:
             "receive_id_type": self.receive_id_type,
             "receive_id": self.receive_id,
             "active_question_id": self.active_question_id,
+            "active_client_id": self.active_client_id,
+            "active_client_request_id": self.active_client_request_id,
             "queued_question_ids": list(self.queued_question_ids),
+            "queued_client_ids": list(self.queued_client_ids),
+            "queued_client_request_ids": list(self.queued_client_request_ids),
         }
 
 

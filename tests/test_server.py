@@ -159,6 +159,8 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(fake_client.calls[0]["receive_id_type"], "chat_id")
         self.assertEqual(fake_client.calls[0]["receive_id"], "oc_configured")
         self.assertEqual(fake_client.calls[0]["allowed_actor_open_id"], "ou_owner")
+        self.assertTrue(str(fake_client.calls[0]["client_id"]))
+        self.assertTrue(str(fake_client.calls[0]["client_request_id"]))
         self.assertEqual(fake_client.calls[0]["wait_options"].timeout_seconds, 321)
         self.assertEqual(fake_client.calls[0]["wait_options"].reminder_max_attempts, 7)
 
@@ -218,6 +220,8 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(first_client.calls[0]["uuid"], "req_123")
         self.assertNotEqual(second_client.calls[0]["uuid"], "req_123")
         self.assertIn("_retry_", second_client.calls[0]["uuid"])
+        self.assertEqual(first_client.calls[0]["client_id"], second_client.calls[0]["client_id"])
+        self.assertEqual(first_client.calls[0]["client_request_id"], second_client.calls[0]["client_request_id"])
 
     def test_ask_user_returns_local_fallback_when_retry_cannot_reach_fresh_daemon(self) -> None:
         settings = self._settings(CHAT_ID="oc_configured")

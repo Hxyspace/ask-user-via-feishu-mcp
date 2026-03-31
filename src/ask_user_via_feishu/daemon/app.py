@@ -87,6 +87,8 @@ class SharedLongConnDaemonApp:
                 allowed_actor_open_id=str(payload.get("allowed_actor_open_id") or "") or None,
                 question_id=str(payload.get("question_id") or "") or None,
                 card=card_value,
+                client_id=str(payload.get("client_id") or "") or None,
+                client_request_id=str(payload.get("client_request_id") or "") or None,
             )
         )
 

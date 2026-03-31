@@ -5,7 +5,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from ask_user_via_feishu.ask_state import AskStatusSnapshot
+from ask_user_via_feishu.ask_state import AskStatusSnapshot, TargetQueueStatus
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.daemon.app import SharedLongConnDaemonApp
 from ask_user_via_feishu.errors import RetryableAskError
@@ -34,7 +34,24 @@ class FakeSharedRuntime:
         return ""
 
     def ask_status_snapshot(self) -> AskStatusSnapshot:
-        return AskStatusSnapshot(active_ask_count=0, queued_ask_count=0)
+        return AskStatusSnapshot(
+            active_ask_count=1,
+            queued_ask_count=1,
+            queues_by_target=(
+                TargetQueueStatus(
+                    delivery_key="chat_id:oc_demo",
+                    receive_id_type="chat_id",
+                    receive_id="oc_demo",
+                    active_question_id="ask_123",
+                    active_client_id="client_alpha",
+                    active_client_request_id="request_alpha",
+                    queued_question_ids=("ask_456",),
+                    queued_client_ids=("client_beta",),
+                    queued_client_request_ids=("request_beta",),
+                ),
+            ),
+            queue_exempt_question_ids=("select_target_123",),
+        )
 
 
 class DaemonAppTest(unittest.TestCase):
@@ -129,10 +146,13 @@ class DaemonAppTest(unittest.TestCase):
 
         self.assertEqual(status["daemon_state"], "shutting_down")
         self.assertEqual(status["failure_reason"], "ws failed")
-        self.assertEqual(status["active_ask_count"], 0)
-        self.assertEqual(status["queued_ask_count"], 0)
-        self.assertEqual(status["queues_by_target"], [])
-        self.assertEqual(status["queue_exempt_question_ids"], [])
+        self.assertEqual(status["active_ask_count"], 1)
+        self.assertEqual(status["queued_ask_count"], 1)
+        self.assertEqual(status["queues_by_target"][0]["active_client_id"], "client_alpha")
+        self.assertEqual(status["queues_by_target"][0]["active_client_request_id"], "request_alpha")
+        self.assertEqual(status["queues_by_target"][0]["queued_client_ids"], ["client_beta"])
+        self.assertEqual(status["queues_by_target"][0]["queued_client_request_ids"], ["request_beta"])
+        self.assertEqual(status["queue_exempt_question_ids"], ["select_target_123"])
         app._server.shutdown.assert_called_once()
 
     def test_ask_and_wait_forwards_optional_card_fields(self) -> None:
@@ -157,6 +177,8 @@ class DaemonAppTest(unittest.TestCase):
                         "allowed_actor_open_id": "ou_demo",
                         "question_id": "select_123",
                         "card": {"header": {"title": {"tag": "plain_text", "content": "选择会话"}}},
+                        "client_id": "client_alpha",
+                        "client_request_id": "request_alpha",
                         "timeout_seconds": 60,
                         "reminder_max_attempts": 0,
                         "timeout_reminder_text": "",
@@ -170,3 +192,5 @@ class DaemonAppTest(unittest.TestCase):
         self.assertEqual(call_kwargs["allowed_actor_open_id"], "ou_demo")
         self.assertEqual(call_kwargs["question_id"], "select_123")
         self.assertEqual(call_kwargs["card"]["header"]["title"]["content"], "选择会话")
+        self.assertEqual(call_kwargs["client_id"], "client_alpha")
+        self.assertEqual(call_kwargs["client_request_id"], "request_alpha")
