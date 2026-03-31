@@ -199,7 +199,7 @@ class AskRuntimeOrchestrator:
             ask_kind=ask_kind,
             receive_id_type=resolved_receive_id_type,
             receive_id=resolved_receive_id,
-            reserve_open_id_slot=ask_kind != "bootstrap_selection",
+            reserve_delivery_slot=ask_kind != "bootstrap_selection",
         )
         try:
             send_result = await self._service.send_interactive(
@@ -214,7 +214,9 @@ class AskRuntimeOrchestrator:
                 resolved_question_id,
                 question_message_id=question_message_id,
                 sent_at_ms=_resolve_sent_at_ms(send_result),
-                target_chat_id=str(send_result.get("chat_id") or ""),
+                target_chat_id=str(
+                    send_result.get("chat_id") or (resolved_receive_id if resolved_receive_id_type == "chat_id" else "")
+                ),
             )
 
             timeout_attempt = 0

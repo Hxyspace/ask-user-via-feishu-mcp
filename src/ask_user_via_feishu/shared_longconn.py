@@ -41,7 +41,7 @@ class PendingQuestion:
     receive_id_type: str = "open_id"
     receive_id: str = ""
     delivery_key: str = ""
-    reserve_open_id_slot: bool = True
+    reserve_delivery_slot: bool = True
     status: str = "pending_send"
     created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     sent_at_ms: int = 0
@@ -71,7 +71,8 @@ class FeishuSharedLongConnectionRuntime:
         self._subscriber = FeishuLongConnectionSubscriber(settings, event_processor, sdk=sdk)
         self._lock = threading.Lock()
         self._pending_by_question_id: dict[str, PendingQuestion] = {}
-        self._pending_by_open_id: dict[str, PendingQuestion] = {}
+        self._ordinary_by_delivery_key: dict[str, PendingQuestion] = {}
+        self._ordinary_by_chat_id: dict[str, PendingQuestion] = {}
         self._thread: threading.Thread | None = None
         self._startup_error: BaseException | None = None
         self._on_terminal_failure = on_terminal_failure
@@ -99,7 +100,7 @@ class FeishuSharedLongConnectionRuntime:
         ask_kind: str = "ordinary",
         receive_id_type: str = "open_id",
         receive_id: str = "",
-        reserve_open_id_slot: bool = True,
+        reserve_delivery_slot: bool = True,
     ) -> PendingQuestion:
         normalized_question_id = question_id.strip()
         normalized_open_id = target_open_id.strip()
@@ -112,11 +113,14 @@ class FeishuSharedLongConnectionRuntime:
             raise ValueError("target_open_id must not be empty.")
         if normalized_ask_kind not in {"ordinary", "bootstrap_selection"}:
             raise ValueError("ask_kind must be either ordinary or bootstrap_selection.")
+        normalized_delivery_key = f"{normalized_receive_id_type}:{normalized_receive_id}"
         with self._lock:
-            existing = self._pending_by_open_id.get(normalized_open_id)
-            if reserve_open_id_slot and existing is not None:
+            if normalized_question_id in self._pending_by_question_id:
+                raise ValueError(f"question_id is already registered: {normalized_question_id}")
+            existing = self._ordinary_by_delivery_key.get(normalized_delivery_key)
+            if reserve_delivery_slot and existing is not None:
                 raise ValueError(
-                    "A pending Feishu question for this open_id already exists. Concurrent questions for the same user are not supported."
+                    "A pending Feishu question for this delivery target already exists. Concurrent questions for the same target are not supported."
                 )
             record = PendingQuestion(
                 question_id=normalized_question_id,
@@ -126,12 +130,12 @@ class FeishuSharedLongConnectionRuntime:
                 ask_kind=normalized_ask_kind,
                 receive_id_type=normalized_receive_id_type,
                 receive_id=normalized_receive_id,
-                delivery_key=f"{normalized_receive_id_type}:{normalized_receive_id}",
-                reserve_open_id_slot=reserve_open_id_slot,
+                delivery_key=normalized_delivery_key,
+                reserve_delivery_slot=reserve_delivery_slot,
             )
             self._pending_by_question_id[normalized_question_id] = record
-            if reserve_open_id_slot:
-                self._pending_by_open_id[normalized_open_id] = record
+            if reserve_delivery_slot:
+                self._ordinary_by_delivery_key[normalized_delivery_key] = record
             return record
 
     def mark_waiting_for_reply(
@@ -146,10 +150,21 @@ class FeishuSharedLongConnectionRuntime:
             record = self._pending_by_question_id.get(question_id.strip())
             if record is None:
                 raise ValueError("Pending question not found.")
+            previous_target_chat_id = record.target_chat_id
+            resolved_target_chat_id = target_chat_id.strip()
+            if not resolved_target_chat_id and record.receive_id_type == "chat_id":
+                resolved_target_chat_id = record.receive_id
             record.question_message_id = question_message_id.strip()
             record.sent_at_ms = sent_at_ms
-            record.target_chat_id = target_chat_id.strip()
+            record.target_chat_id = resolved_target_chat_id
             record.status = "waiting_reply"
+            if (
+                previous_target_chat_id
+                and self._ordinary_by_chat_id.get(previous_target_chat_id) is record
+            ):
+                self._ordinary_by_chat_id.pop(previous_target_chat_id, None)
+            if record.ask_kind == "ordinary" and record.reserve_delivery_slot and resolved_target_chat_id:
+                self._ordinary_by_chat_id[resolved_target_chat_id] = record
 
     def wait_for_question(self, question_id: str, timeout_seconds: int) -> dict[str, Any]:
         with self._lock:
@@ -174,8 +189,12 @@ class FeishuSharedLongConnectionRuntime:
     def unregister_pending_question(self, question_id: str) -> None:
         with self._lock:
             record = self._pending_by_question_id.pop(question_id.strip(), None)
-            if record is not None and record.reserve_open_id_slot:
-                self._pending_by_open_id.pop(record.target_open_id, None)
+            if record is None:
+                return
+            if record.reserve_delivery_slot and self._ordinary_by_delivery_key.get(record.delivery_key) is record:
+                self._ordinary_by_delivery_key.pop(record.delivery_key, None)
+            if record.target_chat_id and self._ordinary_by_chat_id.get(record.target_chat_id) is record:
+                self._ordinary_by_chat_id.pop(record.target_chat_id, None)
 
     def has_pending_question(self) -> bool:
         with self._lock:
@@ -342,10 +361,10 @@ class FeishuSharedLongConnectionRuntime:
         if not text and not resource_refs:
             return None
         with self._lock:
-            record = self._pending_by_open_id.get(sender_open_id)
+            record = self._ordinary_by_chat_id.get(message_chat_id)
         if record is None or record.status != "waiting_reply":
             return None
-        if _is_target_selection_question(record.question_id):
+        if sender_open_id != record.target_open_id or _is_target_selection_question(record.question_id):
             return None
         chat_type = str(message.get("chat_type") or event.get("chat_type") or "").strip().lower()
         if not record.target_chat_id and chat_type and chat_type != "p2p":

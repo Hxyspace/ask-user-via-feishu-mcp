@@ -158,7 +158,7 @@ class FakeRejectPendingRuntime:
 
     def register_pending_question(self, **kwargs):
         raise ValueError(
-            "A pending Feishu question for this open_id already exists. Concurrent questions for the same user are not supported."
+            "A pending Feishu question for this delivery target already exists. Concurrent questions for the same target are not supported."
         )
 
     def mark_waiting_for_reply(self, question_id: str, **kwargs) -> None:
@@ -209,6 +209,19 @@ class FakeTrackingRuntime(FakeAnsweredRuntime):
 
     def mark_waiting_for_reply(self, question_id: str, **kwargs) -> None:
         self.waiting_calls.append({"question_id": question_id, **kwargs})
+
+
+class FakeMissingChatIdMessageService(FakeTimeoutMessageService):
+    async def send_interactive(self, **kwargs):
+        self.sent_interactive.append(kwargs)
+        receive_id = str(kwargs.get("receive_id") or "ou_owner")
+        return {
+            "ok": True,
+            "message_id": "om_question",
+            "receive_id": receive_id,
+            "chat_id": "",
+            "create_time_ms": 1234567890123,
+        }
 
 
 class FakeFailingSendMessageService(FakeTimeoutMessageService):
@@ -339,7 +352,7 @@ class AskRuntimeTest(unittest.TestCase):
 
         self.assertEqual(fake_service.sent_interactive, [])
 
-    def test_target_selection_question_does_not_reserve_open_id_slot(self) -> None:
+    def test_target_selection_question_does_not_reserve_delivery_slot(self) -> None:
         settings = self._settings(ASK_REMINDER_MAX_ATTEMPTS="0", ASK_TIMEOUT_DEFAULT_ANSWER="")
         fake_service = FakeTimeoutMessageService()
         runtime = FakeTimeoutRuntime()
@@ -357,7 +370,23 @@ class AskRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.registered_questions[0]["ask_kind"], "bootstrap_selection")
         self.assertEqual(runtime.registered_questions[0]["receive_id_type"], "open_id")
         self.assertEqual(runtime.registered_questions[0]["receive_id"], "ou_owner")
-        self.assertFalse(runtime.registered_questions[0]["reserve_open_id_slot"])
+        self.assertFalse(runtime.registered_questions[0]["reserve_delivery_slot"])
+
+    def test_chat_target_uses_receive_id_as_fallback_target_chat_id(self) -> None:
+        settings = self._settings()
+        fake_service = FakeMissingChatIdMessageService()
+        runtime = FakeTrackingRuntime()
+
+        result = self._run_ask(
+            settings,
+            fake_service,
+            runtime,
+            receive_id_type="chat_id",
+            receive_id="oc_group",
+        )
+
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(runtime.waiting_calls[0]["target_chat_id"], "oc_group")
 
     def test_unregisters_reserved_pending_when_send_fails(self) -> None:
         settings = self._settings()
