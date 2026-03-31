@@ -190,12 +190,16 @@ class AskRuntimeOrchestrator:
         if not isinstance(resolved_card, dict) or not resolved_card:
             raise ValueError("card must be a non-empty JSON object.")
         question_message_id = ""
+        ask_kind = "bootstrap_selection" if resolved_question_id.startswith("select_target_") else "ordinary"
         self._shared_runtime.register_pending_question(
             question_id=resolved_question_id,
             target_open_id=target_open_id,
             question=question_text,
             question_message_id=question_message_id,
-            reserve_open_id_slot=not resolved_question_id.startswith("select_target_"),
+            ask_kind=ask_kind,
+            receive_id_type=resolved_receive_id_type,
+            receive_id=resolved_receive_id,
+            reserve_open_id_slot=ask_kind != "bootstrap_selection",
         )
         try:
             send_result = await self._service.send_interactive(

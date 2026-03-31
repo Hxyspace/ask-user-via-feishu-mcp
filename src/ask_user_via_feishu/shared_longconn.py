@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from ask_user_via_feishu.ask_state import AskStatusSnapshot, TargetQueueStatus
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.event_handlers import parse_message_content
 from ask_user_via_feishu.event_processor import FeishuEventProcessor
@@ -36,6 +37,10 @@ class PendingQuestion:
     target_open_id: str
     question: str
     question_message_id: str
+    ask_kind: str = "ordinary"
+    receive_id_type: str = "open_id"
+    receive_id: str = ""
+    delivery_key: str = ""
     reserve_open_id_slot: bool = True
     status: str = "pending_send"
     created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
@@ -91,14 +96,22 @@ class FeishuSharedLongConnectionRuntime:
         target_open_id: str,
         question: str,
         question_message_id: str,
+        ask_kind: str = "ordinary",
+        receive_id_type: str = "open_id",
+        receive_id: str = "",
         reserve_open_id_slot: bool = True,
     ) -> PendingQuestion:
         normalized_question_id = question_id.strip()
         normalized_open_id = target_open_id.strip()
+        normalized_ask_kind = ask_kind.strip() or "ordinary"
+        normalized_receive_id_type = receive_id_type.strip() or "open_id"
+        normalized_receive_id = receive_id.strip() or normalized_open_id
         if not normalized_question_id:
             raise ValueError("question_id must not be empty.")
         if not normalized_open_id:
             raise ValueError("target_open_id must not be empty.")
+        if normalized_ask_kind not in {"ordinary", "bootstrap_selection"}:
+            raise ValueError("ask_kind must be either ordinary or bootstrap_selection.")
         with self._lock:
             existing = self._pending_by_open_id.get(normalized_open_id)
             if reserve_open_id_slot and existing is not None:
@@ -110,6 +123,10 @@ class FeishuSharedLongConnectionRuntime:
                 target_open_id=normalized_open_id,
                 question=question,
                 question_message_id=question_message_id,
+                ask_kind=normalized_ask_kind,
+                receive_id_type=normalized_receive_id_type,
+                receive_id=normalized_receive_id,
+                delivery_key=f"{normalized_receive_id_type}:{normalized_receive_id}",
                 reserve_open_id_slot=reserve_open_id_slot,
             )
             self._pending_by_question_id[normalized_question_id] = record
@@ -169,6 +186,50 @@ class FeishuSharedLongConnectionRuntime:
             for question_id in self._pending_by_question_id:
                 return question_id
         return ""
+
+    def ask_status_snapshot(self) -> AskStatusSnapshot:
+        with self._lock:
+            records = list(self._pending_by_question_id.values())
+        queues_by_delivery_key: dict[str, dict[str, Any]] = {}
+        queue_exempt_question_ids: list[str] = []
+        active_ask_count = 0
+        queued_ask_count = 0
+        for record in records:
+            if record.ask_kind != "ordinary":
+                queue_exempt_question_ids.append(record.question_id)
+                continue
+            entry = queues_by_delivery_key.setdefault(
+                record.delivery_key,
+                {
+                    "delivery_key": record.delivery_key,
+                    "receive_id_type": record.receive_id_type,
+                    "receive_id": record.receive_id,
+                    "active_question_id": "",
+                    "queued_question_ids": [],
+                },
+            )
+            if not entry["active_question_id"]:
+                entry["active_question_id"] = record.question_id
+                active_ask_count += 1
+            else:
+                entry["queued_question_ids"].append(record.question_id)
+                queued_ask_count += 1
+        queues_by_target = tuple(
+            TargetQueueStatus(
+                delivery_key=str(entry["delivery_key"]),
+                receive_id_type=str(entry["receive_id_type"]),
+                receive_id=str(entry["receive_id"]),
+                active_question_id=str(entry["active_question_id"]),
+                queued_question_ids=tuple(str(question_id) for question_id in entry["queued_question_ids"]),
+            )
+            for _, entry in sorted(queues_by_delivery_key.items())
+        )
+        return AskStatusSnapshot(
+            active_ask_count=active_ask_count,
+            queued_ask_count=queued_ask_count,
+            queues_by_target=queues_by_target,
+            queue_exempt_question_ids=tuple(sorted(queue_exempt_question_ids)),
+        )
 
     def long_connection_state(self) -> str:
         if self._startup_error is not None:

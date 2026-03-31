@@ -413,6 +413,9 @@ class LongConnectionTest(unittest.TestCase):
             target_open_id="ou_owner",
             question="Q",
             question_message_id="om_ask",
+            ask_kind="ordinary",
+            receive_id_type="chat_id",
+            receive_id="oc_ask",
         )
         runtime.mark_waiting_for_reply(
             "ask_123",
@@ -425,6 +428,9 @@ class LongConnectionTest(unittest.TestCase):
             target_open_id="ou_owner",
             question="select",
             question_message_id="om_select",
+            ask_kind="bootstrap_selection",
+            receive_id_type="open_id",
+            receive_id="ou_owner",
             reserve_open_id_slot=False,
         )
         runtime.mark_waiting_for_reply(
@@ -469,6 +475,47 @@ class LongConnectionTest(unittest.TestCase):
         self.assertEqual(selection_result["message_type"], "card_action")
         self.assertEqual(selection_response.toast.content, "已收到你的选择")
         self.assertEqual(ask_result["text"], "hello ask")
+
+    def test_shared_runtime_reports_target_queue_status_snapshot(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_ask",
+            ask_kind="ordinary",
+            receive_id_type="chat_id",
+            receive_id="oc_ask",
+        )
+        runtime.register_pending_question(
+            question_id="select_target_123",
+            target_open_id="ou_owner",
+            question="select",
+            question_message_id="om_select",
+            ask_kind="bootstrap_selection",
+            receive_id_type="open_id",
+            receive_id="ou_owner",
+            reserve_open_id_slot=False,
+        )
+
+        snapshot = runtime.ask_status_snapshot().to_dict()
+
+        self.assertEqual(snapshot["active_ask_count"], 1)
+        self.assertEqual(snapshot["queued_ask_count"], 0)
+        self.assertEqual(
+            snapshot["queues_by_target"],
+            [
+                {
+                    "delivery_key": "chat_id:oc_ask",
+                    "receive_id_type": "chat_id",
+                    "receive_id": "oc_ask",
+                    "active_question_id": "ask_123",
+                    "queued_question_ids": [],
+                }
+            ],
+        )
+        self.assertEqual(snapshot["queue_exempt_question_ids"], ["select_target_123"])
 
     def test_shared_runtime_ignores_reply_before_question_is_waiting(self) -> None:
         processor = FakeEventProcessor()

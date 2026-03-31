@@ -94,12 +94,14 @@ class SharedLongConnDaemonApp:
         with self._lifecycle_lock:
             daemon_state = self._daemon_state
             failure_reason = self._failure_reason
+        ask_status = self._shared_runtime.ask_status_snapshot().to_dict()
         return {
             "daemon_state": daemon_state,
             "failure_reason": failure_reason,
             "long_connection_state": self._shared_runtime.long_connection_state(),
             "pending_ask": self._shared_runtime.has_pending_question(),
             "pending_question_id": self._shared_runtime.current_pending_question_id(),
+            **ask_status,
         }
 
     @staticmethod

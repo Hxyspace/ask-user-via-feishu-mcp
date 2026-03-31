@@ -5,6 +5,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from ask_user_via_feishu.ask_state import AskStatusSnapshot
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.daemon.app import SharedLongConnDaemonApp
 from ask_user_via_feishu.errors import RetryableAskError
@@ -31,6 +32,9 @@ class FakeSharedRuntime:
 
     def current_pending_question_id(self) -> str:
         return ""
+
+    def ask_status_snapshot(self) -> AskStatusSnapshot:
+        return AskStatusSnapshot(active_ask_count=0, queued_ask_count=0)
 
 
 class DaemonAppTest(unittest.TestCase):
@@ -125,6 +129,10 @@ class DaemonAppTest(unittest.TestCase):
 
         self.assertEqual(status["daemon_state"], "shutting_down")
         self.assertEqual(status["failure_reason"], "ws failed")
+        self.assertEqual(status["active_ask_count"], 0)
+        self.assertEqual(status["queued_ask_count"], 0)
+        self.assertEqual(status["queues_by_target"], [])
+        self.assertEqual(status["queue_exempt_question_ids"], [])
         app._server.shutdown.assert_called_once()
 
     def test_ask_and_wait_forwards_optional_card_fields(self) -> None:

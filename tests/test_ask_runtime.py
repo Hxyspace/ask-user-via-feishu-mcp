@@ -354,6 +354,9 @@ class AskRuntimeTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "timeout")
         self.assertEqual(runtime.registered_questions[0]["question_id"], "select_target_123")
+        self.assertEqual(runtime.registered_questions[0]["ask_kind"], "bootstrap_selection")
+        self.assertEqual(runtime.registered_questions[0]["receive_id_type"], "open_id")
+        self.assertEqual(runtime.registered_questions[0]["receive_id"], "ou_owner")
         self.assertFalse(runtime.registered_questions[0]["reserve_open_id_slot"])
 
     def test_unregisters_reserved_pending_when_send_fails(self) -> None:
