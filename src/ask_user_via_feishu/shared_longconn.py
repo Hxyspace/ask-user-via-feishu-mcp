@@ -8,7 +8,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from ask_user_via_feishu.ask_state import AskStatusSnapshot, TargetQueueStatus
+from ask_user_via_feishu.ask_state import (
+    AskStatusSnapshot,
+    DeliveryAskQueueState,
+    enqueue_ask,
+    promote_next_ask,
+    remove_ask,
+)
 from ask_user_via_feishu.config import Settings
 from ask_user_via_feishu.event_handlers import parse_message_content
 from ask_user_via_feishu.event_processor import FeishuEventProcessor
@@ -71,7 +77,7 @@ class FeishuSharedLongConnectionRuntime:
         self._subscriber = FeishuLongConnectionSubscriber(settings, event_processor, sdk=sdk)
         self._lock = threading.Lock()
         self._pending_by_question_id: dict[str, PendingQuestion] = {}
-        self._ordinary_by_delivery_key: dict[str, PendingQuestion] = {}
+        self._ordinary_queue_by_delivery_key: dict[str, DeliveryAskQueueState] = {}
         self._ordinary_by_chat_id: dict[str, PendingQuestion] = {}
         self._thread: threading.Thread | None = None
         self._startup_error: BaseException | None = None
@@ -117,11 +123,6 @@ class FeishuSharedLongConnectionRuntime:
         with self._lock:
             if normalized_question_id in self._pending_by_question_id:
                 raise ValueError(f"question_id is already registered: {normalized_question_id}")
-            existing = self._ordinary_by_delivery_key.get(normalized_delivery_key)
-            if reserve_delivery_slot and existing is not None:
-                raise ValueError(
-                    "A pending Feishu question for this delivery target already exists. Concurrent questions for the same target are not supported."
-                )
             record = PendingQuestion(
                 question_id=normalized_question_id,
                 target_open_id=normalized_open_id,
@@ -133,10 +134,35 @@ class FeishuSharedLongConnectionRuntime:
                 delivery_key=normalized_delivery_key,
                 reserve_delivery_slot=reserve_delivery_slot,
             )
-            self._pending_by_question_id[normalized_question_id] = record
             if reserve_delivery_slot:
-                self._ordinary_by_delivery_key[normalized_delivery_key] = record
+                queue_state = self._ordinary_queue_by_delivery_key.get(normalized_delivery_key)
+                if queue_state is None:
+                    queue_state = DeliveryAskQueueState(
+                        delivery_key=normalized_delivery_key,
+                        receive_id_type=normalized_receive_id_type,
+                        receive_id=normalized_receive_id,
+                    )
+                queue_state, activated = enqueue_ask(queue_state, question_id=normalized_question_id)
+                self._ordinary_queue_by_delivery_key[normalized_delivery_key] = queue_state
+                record.status = "pending_send" if activated else "queued"
+            self._pending_by_question_id[normalized_question_id] = record
             return record
+
+    def wait_until_sendable(self, question_id: str) -> None:
+        with self._lock:
+            record = self._pending_by_question_id.get(question_id.strip())
+        if record is None:
+            raise ValueError("Pending question not found.")
+        if record.ask_kind != "ordinary" or not record.reserve_delivery_slot:
+            return
+        while True:
+            with record.condition:
+                if record.status != "queued":
+                    return
+                startup_error = self._startup_error
+                if startup_error is not None:
+                    raise PendingQuestionAborted("Shared Feishu long connection is no longer available.") from startup_error
+                record.condition.wait(0.2)
 
     def mark_waiting_for_reply(
         self,
@@ -150,6 +176,10 @@ class FeishuSharedLongConnectionRuntime:
             record = self._pending_by_question_id.get(question_id.strip())
             if record is None:
                 raise ValueError("Pending question not found.")
+            if record.ask_kind == "ordinary" and record.reserve_delivery_slot:
+                queue_state = self._ordinary_queue_by_delivery_key.get(record.delivery_key)
+                if queue_state is None or queue_state.active_question_id != record.question_id:
+                    raise ValueError("Pending question is not sendable.")
             previous_target_chat_id = record.target_chat_id
             resolved_target_chat_id = target_chat_id.strip()
             if not resolved_target_chat_id and record.receive_id_type == "chat_id":
@@ -187,14 +217,32 @@ class FeishuSharedLongConnectionRuntime:
                 record.condition.wait(min(remaining, 0.2))
 
     def unregister_pending_question(self, question_id: str) -> None:
+        notify_records: list[PendingQuestion] = []
         with self._lock:
             record = self._pending_by_question_id.pop(question_id.strip(), None)
             if record is None:
                 return
-            if record.reserve_delivery_slot and self._ordinary_by_delivery_key.get(record.delivery_key) is record:
-                self._ordinary_by_delivery_key.pop(record.delivery_key, None)
             if record.target_chat_id and self._ordinary_by_chat_id.get(record.target_chat_id) is record:
                 self._ordinary_by_chat_id.pop(record.target_chat_id, None)
+            if record.reserve_delivery_slot:
+                queue_state = self._ordinary_queue_by_delivery_key.get(record.delivery_key)
+                if queue_state is not None:
+                    queue_state, removed_active = remove_ask(queue_state, question_id=record.question_id)
+                    promoted_question_id = ""
+                    if removed_active:
+                        queue_state, promoted_question_id = promote_next_ask(queue_state)
+                    if queue_state.is_empty():
+                        self._ordinary_queue_by_delivery_key.pop(record.delivery_key, None)
+                    else:
+                        self._ordinary_queue_by_delivery_key[record.delivery_key] = queue_state
+                    if promoted_question_id:
+                        promoted_record = self._pending_by_question_id.get(promoted_question_id)
+                        if promoted_record is not None:
+                            notify_records.append(promoted_record)
+        for pending_record in notify_records:
+            with pending_record.condition:
+                pending_record.status = "pending_send"
+                pending_record.condition.notify_all()
 
     def has_pending_question(self) -> bool:
         with self._lock:
@@ -208,46 +256,23 @@ class FeishuSharedLongConnectionRuntime:
 
     def ask_status_snapshot(self) -> AskStatusSnapshot:
         with self._lock:
-            records = list(self._pending_by_question_id.values())
-        queues_by_delivery_key: dict[str, dict[str, Any]] = {}
-        queue_exempt_question_ids: list[str] = []
-        active_ask_count = 0
-        queued_ask_count = 0
-        for record in records:
-            if record.ask_kind != "ordinary":
-                queue_exempt_question_ids.append(record.question_id)
-                continue
-            entry = queues_by_delivery_key.setdefault(
-                record.delivery_key,
-                {
-                    "delivery_key": record.delivery_key,
-                    "receive_id_type": record.receive_id_type,
-                    "receive_id": record.receive_id,
-                    "active_question_id": "",
-                    "queued_question_ids": [],
-                },
+            queue_states = list(self._ordinary_queue_by_delivery_key.values())
+            queue_exempt_question_ids = sorted(
+                record.question_id
+                for record in self._pending_by_question_id.values()
+                if record.ask_kind != "ordinary"
             )
-            if not entry["active_question_id"]:
-                entry["active_question_id"] = record.question_id
-                active_ask_count += 1
-            else:
-                entry["queued_question_ids"].append(record.question_id)
-                queued_ask_count += 1
+        active_ask_count = sum(1 for queue_state in queue_states if queue_state.active_question_id)
+        queued_ask_count = sum(len(queue_state.queued_question_ids) for queue_state in queue_states)
         queues_by_target = tuple(
-            TargetQueueStatus(
-                delivery_key=str(entry["delivery_key"]),
-                receive_id_type=str(entry["receive_id_type"]),
-                receive_id=str(entry["receive_id"]),
-                active_question_id=str(entry["active_question_id"]),
-                queued_question_ids=tuple(str(question_id) for question_id in entry["queued_question_ids"]),
-            )
-            for _, entry in sorted(queues_by_delivery_key.items())
+            queue_state.to_target_queue_status()
+            for queue_state in sorted(queue_states, key=lambda item: item.delivery_key)
         )
         return AskStatusSnapshot(
             active_ask_count=active_ask_count,
             queued_ask_count=queued_ask_count,
             queues_by_target=queues_by_target,
-            queue_exempt_question_ids=tuple(sorted(queue_exempt_question_ids)),
+            queue_exempt_question_ids=tuple(queue_exempt_question_ids),
         )
 
     def long_connection_state(self) -> str:

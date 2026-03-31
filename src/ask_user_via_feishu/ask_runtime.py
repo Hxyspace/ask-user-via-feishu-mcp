@@ -202,6 +202,13 @@ class AskRuntimeOrchestrator:
             reserve_delivery_slot=ask_kind != "bootstrap_selection",
         )
         try:
+            try:
+                await asyncio.to_thread(self._shared_runtime.wait_until_sendable, resolved_question_id)
+            except PendingQuestionAborted as exc:
+                raise RetryableAskError(
+                    "Shared Feishu long connection failed before sending the question.",
+                    retry_stage="before_send",
+                ) from exc
             send_result = await self._service.send_interactive(
                 receive_id_type=resolved_receive_id_type,
                 receive_id=resolved_receive_id,

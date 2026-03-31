@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import threading
+import time
 import unittest
 
 from ask_user_via_feishu.ask_runtime import (
     ASK_AUTO_RECALL_ANSWER,
     ASK_RESOURCES_ONLY_ANSWER,
+    AskWaitOptions,
     AskRuntimeOrchestrator,
     build_wait_options,
 )
@@ -68,7 +71,12 @@ class FakeTimeoutMessageService:
         }
 
 
-class FakeFileOnlyRuntime:
+class ImmediateSendableRuntimeMixin:
+    def wait_until_sendable(self, question_id: str) -> None:
+        return None
+
+
+class FakeFileOnlyRuntime(ImmediateSendableRuntimeMixin):
     def ensure_started(self) -> None:
         return None
 
@@ -103,7 +111,7 @@ class FakeDownloadMessageService(FakeTimeoutMessageService):
         return ["/tmp/receive_files/ask_123/report.pdf"]
 
 
-class FakeTimeoutRuntime:
+class FakeTimeoutRuntime(ImmediateSendableRuntimeMixin):
     last_instance = None
 
     def __init__(self) -> None:
@@ -128,7 +136,7 @@ class FakeTimeoutRuntime:
         raise PendingQuestionTimeout(f"Timed out after {timeout_seconds} seconds")
 
 
-class FakeAnsweredRuntime:
+class FakeAnsweredRuntime(ImmediateSendableRuntimeMixin):
     def ensure_started(self) -> None:
         return None
 
@@ -152,23 +160,7 @@ class FakeAnsweredRuntime:
         }
 
 
-class FakeRejectPendingRuntime:
-    def ensure_started(self) -> None:
-        return None
-
-    def register_pending_question(self, **kwargs):
-        raise ValueError(
-            "A pending Feishu question for this delivery target already exists. Concurrent questions for the same target are not supported."
-        )
-
-    def mark_waiting_for_reply(self, question_id: str, **kwargs) -> None:
-        return None
-
-    def unregister_pending_question(self, question_id: str) -> None:
-        return None
-
-
-class FakeRollbackRuntime:
+class FakeRollbackRuntime(ImmediateSendableRuntimeMixin):
     last_instance = None
 
     def __init__(self) -> None:
@@ -234,6 +226,134 @@ class FakeFailingReminderMessageService(FakeTimeoutMessageService):
     async def send_text(self, **kwargs):
         self.sent_texts.append(kwargs)
         raise MessageValidationError("reminder failed")
+
+
+class FakeAbortWhileQueuedRuntime(FakeAnsweredRuntime):
+    def wait_until_sendable(self, question_id: str) -> None:
+        raise PendingQuestionAborted("ws failed")
+
+
+class FakeSequencedMessageService(FakeTimeoutMessageService):
+    async def send_interactive(self, **kwargs):
+        self.sent_interactive.append(kwargs)
+        receive_id_type = str(kwargs.get("receive_id_type") or "open_id")
+        receive_id = str(kwargs.get("receive_id") or "ou_owner")
+        index = len(self.sent_interactive)
+        return {
+            "ok": True,
+            "message_id": f"om_question_{index}",
+            "receive_id": receive_id,
+            "chat_id": receive_id if receive_id_type == "chat_id" else "oc_p2p",
+            "create_time_ms": 1234567890123 + index,
+        }
+
+
+class FakeBlockingFailFirstQueuedMessageService(FakeTimeoutMessageService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_send_started = asyncio.Event()
+        self.release_first_send = asyncio.Event()
+
+    async def send_interactive(self, **kwargs):
+        self.sent_interactive.append(kwargs)
+        receive_id_type = str(kwargs.get("receive_id_type") or "open_id")
+        receive_id = str(kwargs.get("receive_id") or "ou_owner")
+        if len(self.sent_interactive) == 1:
+            self.first_send_started.set()
+            await asyncio.wait_for(self.release_first_send.wait(), timeout=1)
+            raise MessageValidationError("send failed")
+        return {
+            "ok": True,
+            "message_id": f"om_question_{len(self.sent_interactive)}",
+            "receive_id": receive_id,
+            "chat_id": receive_id if receive_id_type == "chat_id" else "oc_p2p",
+            "create_time_ms": 1234567890123 + len(self.sent_interactive),
+        }
+
+
+class FakeQueuedRuntime:
+    def __init__(self) -> None:
+        self.records: dict[str, dict[str, object]] = {}
+        self.delivery_queues: dict[str, list[str]] = {}
+        self.mark_waiting_calls: list[dict[str, object]] = []
+        self.unregistered_question_ids: list[str] = []
+
+    def ensure_started(self) -> None:
+        return None
+
+    def register_pending_question(self, **kwargs):
+        question_id = str(kwargs["question_id"])
+        delivery_key = f"{kwargs.get('receive_id_type', 'open_id')}:{kwargs.get('receive_id') or kwargs.get('target_open_id')}"
+        reserve_delivery_slot = bool(kwargs.get("reserve_delivery_slot", True))
+        queue = self.delivery_queues.setdefault(delivery_key, []) if reserve_delivery_slot else []
+        status = "pending_send" if not reserve_delivery_slot or not queue else "queued"
+        if reserve_delivery_slot:
+            queue.append(question_id)
+        self.records[question_id] = {
+            "question_id": question_id,
+            "delivery_key": delivery_key,
+            "reserve_delivery_slot": reserve_delivery_slot,
+            "status": status,
+            "condition": threading.Condition(),
+            "result": None,
+        }
+        return None
+
+    def wait_until_sendable(self, question_id: str) -> None:
+        record = self.records[question_id]
+        while True:
+            with record["condition"]:
+                if record["status"] != "queued":
+                    return
+                record["condition"].wait(0.05)
+
+    def mark_waiting_for_reply(self, question_id: str, **kwargs) -> None:
+        record = self.records[question_id]
+        record["status"] = "waiting_reply"
+        self.mark_waiting_calls.append({"question_id": question_id, **kwargs})
+
+    def wait_for_question(self, question_id: str, timeout_seconds: int):
+        record = self.records[question_id]
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            with record["condition"]:
+                if record["result"] is not None:
+                    return dict(record["result"])
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PendingQuestionTimeout(f"Timed out after {timeout_seconds} seconds")
+                record["condition"].wait(min(remaining, 0.05))
+
+    def resolve_question(self, question_id: str, result: dict[str, object]) -> None:
+        record = self.records[question_id]
+        with record["condition"]:
+            record["result"] = result
+            record["status"] = "answered"
+            record["condition"].notify_all()
+
+    def unregister_pending_question(self, question_id: str) -> None:
+        record = self.records.pop(question_id, None)
+        self.unregistered_question_ids.append(question_id)
+        if record is None:
+            return
+        if not record["reserve_delivery_slot"]:
+            return
+        delivery_key = str(record["delivery_key"])
+        queue = self.delivery_queues.get(delivery_key, [])
+        if not queue:
+            return
+        was_active = queue[0] == question_id
+        queue = [queued_question_id for queued_question_id in queue if queued_question_id != question_id]
+        if not queue:
+            self.delivery_queues.pop(delivery_key, None)
+            return
+        self.delivery_queues[delivery_key] = queue
+        if not was_active:
+            return
+        promoted_record = self.records[queue[0]]
+        with promoted_record["condition"]:
+            promoted_record["status"] = "pending_send"
+            promoted_record["condition"].notify_all()
 
 
 class AskRuntimeTest(unittest.TestCase):
@@ -343,14 +463,172 @@ class AskRuntimeTest(unittest.TestCase):
         self.assertEqual(len(fake_service.sent_texts), 1)
         self.assertEqual(len(fake_service.updated_cards), 1)
 
-    def test_fails_before_sending_when_pending_slot_is_unavailable(self) -> None:
+    def test_same_delivery_second_ask_waits_to_send_until_first_finishes(self) -> None:
+        settings = self._settings()
+        fake_service = FakeSequencedMessageService()
+        runtime = FakeQueuedRuntime()
+        orchestrator = AskRuntimeOrchestrator(settings, fake_service, runtime)
+
+        async def run_scenario() -> tuple[dict[str, object], dict[str, object]]:
+            first_task = asyncio.create_task(
+                orchestrator.ask(
+                    question="第一问",
+                    choices=None,
+                    uuid=None,
+                    receive_id_type="chat_id",
+                    receive_id="oc_group_123",
+                    question_id="ask_first",
+                    wait_options=AskWaitOptions(
+                        timeout_seconds=3,
+                        reminder_max_attempts=0,
+                        timeout_reminder_text="",
+                        timeout_default_answer="",
+                    ),
+                )
+            )
+            await asyncio.sleep(0.1)
+            second_task = asyncio.create_task(
+                orchestrator.ask(
+                    question="第二问",
+                    choices=None,
+                    uuid=None,
+                    receive_id_type="chat_id",
+                    receive_id="oc_group_123",
+                    question_id="ask_second",
+                    wait_options=AskWaitOptions(
+                        timeout_seconds=1,
+                        reminder_max_attempts=0,
+                        timeout_reminder_text="",
+                        timeout_default_answer="",
+                    ),
+                )
+            )
+            await asyncio.sleep(0.2)
+            self.assertEqual(len(fake_service.sent_interactive), 1)
+            self.assertIn("第一问", fake_service.sent_interactive[0]["card"]["elements"][0]["content"])
+            await asyncio.sleep(1.2)
+            self.assertEqual(len(fake_service.sent_interactive), 1)
+
+            runtime.resolve_question(
+                "ask_first",
+                {
+                    "message_id": "om_reply_1",
+                    "chat_id": "oc_group_123",
+                    "message_type": "text",
+                    "text": "first answer",
+                    "message_content": {"text": "first answer"},
+                    "callback_response": {},
+                },
+            )
+            first_result = await first_task
+            await asyncio.sleep(0.2)
+            self.assertEqual(len(fake_service.sent_interactive), 2)
+            self.assertIn("第二问", fake_service.sent_interactive[1]["card"]["elements"][0]["content"])
+
+            runtime.resolve_question(
+                "ask_second",
+                {
+                    "message_id": "om_reply_2",
+                    "chat_id": "oc_group_123",
+                    "message_type": "text",
+                    "text": "second answer",
+                    "message_content": {"text": "second answer"},
+                    "callback_response": {},
+                },
+            )
+            second_result = await second_task
+            return first_result, second_result
+
+        first_result, second_result = asyncio.run(run_scenario())
+
+        self.assertEqual(first_result["status"], "answered")
+        self.assertEqual(first_result["user_answer"], "first answer")
+        self.assertEqual(second_result["status"], "answered")
+        self.assertEqual(second_result["user_answer"], "second answer")
+        self.assertEqual(
+            [call["question_id"] for call in runtime.mark_waiting_calls],
+            ["ask_first", "ask_second"],
+        )
+        self.assertEqual(runtime.unregistered_question_ids, ["ask_first", "ask_second"])
+
+    def test_returns_retryable_error_if_queued_question_cannot_be_sent(self) -> None:
         settings = self._settings()
         fake_service = FakeTimeoutMessageService()
 
-        with self.assertRaises(ValueError):
-            self._run_ask(settings, fake_service, FakeRejectPendingRuntime())
+        with self.assertRaises(RetryableAskError) as error:
+            self._run_ask(settings, fake_service, FakeAbortWhileQueuedRuntime())
 
+        self.assertEqual(error.exception.retry_stage, "before_send")
         self.assertEqual(fake_service.sent_interactive, [])
+
+    def test_same_delivery_second_ask_sends_after_first_send_failure(self) -> None:
+        settings = self._settings()
+        fake_service = FakeBlockingFailFirstQueuedMessageService()
+        runtime = FakeQueuedRuntime()
+        orchestrator = AskRuntimeOrchestrator(settings, fake_service, runtime)
+
+        async def run_scenario() -> tuple[str, dict[str, object]]:
+            first_task = asyncio.create_task(
+                orchestrator.ask(
+                    question="第一问",
+                    choices=None,
+                    uuid=None,
+                    receive_id_type="chat_id",
+                    receive_id="oc_group_123",
+                    question_id="ask_first",
+                    wait_options=AskWaitOptions(
+                        timeout_seconds=3,
+                        reminder_max_attempts=0,
+                        timeout_reminder_text="",
+                        timeout_default_answer="",
+                    ),
+                )
+            )
+            await fake_service.first_send_started.wait()
+            second_task = asyncio.create_task(
+                orchestrator.ask(
+                    question="第二问",
+                    choices=None,
+                    uuid=None,
+                    receive_id_type="chat_id",
+                    receive_id="oc_group_123",
+                    question_id="ask_second",
+                    wait_options=AskWaitOptions(
+                        timeout_seconds=3,
+                        reminder_max_attempts=0,
+                        timeout_reminder_text="",
+                        timeout_default_answer="",
+                    ),
+                )
+            )
+            await asyncio.sleep(0.1)
+            self.assertEqual(len(fake_service.sent_interactive), 1)
+
+            fake_service.release_first_send.set()
+            with self.assertRaises(MessageValidationError):
+                await first_task
+
+            await asyncio.sleep(0.1)
+            self.assertEqual(len(fake_service.sent_interactive), 2)
+            runtime.resolve_question(
+                "ask_second",
+                {
+                    "message_id": "om_reply_2",
+                    "chat_id": "oc_group_123",
+                    "message_type": "text",
+                    "text": "second answer",
+                    "message_content": {"text": "second answer"},
+                    "callback_response": {},
+                },
+            )
+            return "failed", await second_task
+
+        first_status, second_result = asyncio.run(run_scenario())
+
+        self.assertEqual(first_status, "failed")
+        self.assertEqual(second_result["status"], "answered")
+        self.assertEqual(second_result["user_answer"], "second answer")
+        self.assertEqual(runtime.unregistered_question_ids, ["ask_first", "ask_second"])
 
     def test_target_selection_question_does_not_reserve_delivery_slot(self) -> None:
         settings = self._settings(ASK_REMINDER_MAX_ATTEMPTS="0", ASK_TIMEOUT_DEFAULT_ANSWER="")

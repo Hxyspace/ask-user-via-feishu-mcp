@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import unittest
 
@@ -590,7 +591,7 @@ class LongConnectionTest(unittest.TestCase):
 
         self.assertEqual(result_a["text"], "hello a")
 
-    def test_shared_runtime_rejects_parallel_ordinary_questions_for_same_delivery_key(self) -> None:
+    def test_shared_runtime_queues_parallel_ordinary_questions_for_same_delivery_key(self) -> None:
         processor = FakeEventProcessor()
         runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
         runtime.register_pending_question(
@@ -602,19 +603,233 @@ class LongConnectionTest(unittest.TestCase):
             receive_id_type="chat_id",
             receive_id="oc_same_chat",
         )
+        runtime.register_pending_question(
+            question_id="ask_456",
+            target_open_id="ou_owner",
+            question="Q2",
+            question_message_id="om_question_2",
+            ask_kind="ordinary",
+            receive_id_type="chat_id",
+            receive_id="oc_same_chat",
+        )
 
-        with self.assertRaises(ValueError) as error:
-            runtime.register_pending_question(
-                question_id="ask_456",
-                target_open_id="ou_owner",
-                question="Q2",
-                question_message_id="om_question_2",
-                ask_kind="ordinary",
-                receive_id_type="chat_id",
-                receive_id="oc_same_chat",
-            )
+        snapshot = runtime.ask_status_snapshot().to_dict()
 
-        self.assertIn("delivery target", str(error.exception))
+        self.assertEqual(runtime._pending_by_question_id["ask_123"].status, "pending_send")
+        self.assertEqual(runtime._pending_by_question_id["ask_456"].status, "queued")
+        self.assertEqual(snapshot["active_ask_count"], 1)
+        self.assertEqual(snapshot["queued_ask_count"], 1)
+        self.assertEqual(
+            snapshot["queues_by_target"],
+            [
+                {
+                    "delivery_key": "chat_id:oc_same_chat",
+                    "receive_id_type": "chat_id",
+                    "receive_id": "oc_same_chat",
+                    "active_question_id": "ask_123",
+                    "queued_question_ids": ["ask_456"],
+                }
+            ],
+        )
+
+    def test_shared_runtime_promotes_queued_question_after_active_unregister(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+            ask_kind="ordinary",
+            receive_id_type="chat_id",
+            receive_id="oc_same_chat",
+        )
+        runtime.register_pending_question(
+            question_id="ask_456",
+            target_open_id="ou_owner",
+            question="Q2",
+            question_message_id="om_question_2",
+            ask_kind="ordinary",
+            receive_id_type="chat_id",
+            receive_id="oc_same_chat",
+        )
+
+        sendable = threading.Event()
+        waiter = threading.Thread(target=lambda: (runtime.wait_until_sendable("ask_456"), sendable.set()))
+        waiter.start()
+        self.assertFalse(sendable.wait(0.05))
+
+        runtime.unregister_pending_question("ask_123")
+
+        self.assertTrue(sendable.wait(1))
+        waiter.join(1)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(runtime._pending_by_question_id["ask_456"].status, "pending_send")
+        self.assertEqual(
+            runtime.ask_status_snapshot().to_dict()["queues_by_target"],
+            [
+                {
+                    "delivery_key": "chat_id:oc_same_chat",
+                    "receive_id_type": "chat_id",
+                    "receive_id": "oc_same_chat",
+                    "active_question_id": "ask_456",
+                    "queued_question_ids": [],
+                }
+            ],
+        )
+
+    def test_shared_runtime_aborts_waiting_queued_question_when_longconn_fails(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+            ask_kind="ordinary",
+            receive_id_type="chat_id",
+            receive_id="oc_same_chat",
+        )
+        runtime.register_pending_question(
+            question_id="ask_456",
+            target_open_id="ou_owner",
+            question="Q2",
+            question_message_id="om_question_2",
+            ask_kind="ordinary",
+            receive_id_type="chat_id",
+            receive_id="oc_same_chat",
+        )
+
+        failures: list[str] = []
+
+        def wait_for_send_turn() -> None:
+            try:
+                runtime.wait_until_sendable("ask_456")
+            except PendingQuestionAborted as exc:
+                failures.append(str(exc))
+
+        waiter = threading.Thread(target=wait_for_send_turn)
+        waiter.start()
+        time.sleep(0.05)
+        runtime._startup_error = RuntimeError("ws failed")
+        runtime._notify_pending_question_updates()
+
+        waiter.join(1)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(failures, ["Shared Feishu long connection is no longer available."])
+
+    def test_shared_runtime_queued_question_does_not_match_replies_until_sent(self) -> None:
+        processor = FakeEventProcessor()
+        runtime = FeishuSharedLongConnectionRuntime(self._settings(), processor, sdk=FakeSDK)
+        runtime.register_pending_question(
+            question_id="ask_123",
+            target_open_id="ou_owner",
+            question="Q",
+            question_message_id="om_question",
+            ask_kind="ordinary",
+            receive_id_type="chat_id",
+            receive_id="oc_same_chat",
+        )
+        runtime.mark_waiting_for_reply(
+            "ask_123",
+            question_message_id="om_question",
+            sent_at_ms=1_000,
+            target_chat_id="oc_same_chat",
+        )
+        runtime.register_pending_question(
+            question_id="ask_456",
+            target_open_id="ou_owner",
+            question="Q2",
+            question_message_id="om_question_2",
+            ask_kind="ordinary",
+            receive_id_type="chat_id",
+            receive_id="oc_same_chat",
+        )
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply_active",
+                    "chat_id": "oc_same_chat",
+                    "chat_type": "group",
+                    "create_time": "1000",
+                    "message_type": "text",
+                    "content": '{"text":"hello active"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+
+        active_result = runtime.wait_for_question("ask_123", 1)
+        with self.assertRaises(PendingQuestionTimeout):
+            runtime.wait_for_question("ask_456", 0)
+
+        runtime.unregister_pending_question("ask_123")
+        self.assertEqual(runtime._pending_by_question_id["ask_456"].status, "pending_send")
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply_unsent",
+                    "chat_id": "oc_same_chat",
+                    "chat_type": "group",
+                    "create_time": "1500",
+                    "message_type": "text",
+                    "content": '{"text":"hello unsent"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+
+        with self.assertRaises(PendingQuestionTimeout):
+            runtime.wait_for_question("ask_456", 0)
+
+        runtime.mark_waiting_for_reply(
+            "ask_456",
+            question_message_id="om_question_2",
+            sent_at_ms=2_000,
+            target_chat_id="oc_same_chat",
+        )
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply_old",
+                    "chat_id": "oc_same_chat",
+                    "chat_type": "group",
+                    "create_time": "1500",
+                    "message_type": "text",
+                    "content": '{"text":"hello old"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+
+        with self.assertRaises(PendingQuestionTimeout):
+            runtime.wait_for_question("ask_456", 0)
+
+        runtime.handle_event(
+            "im.message.receive_v1",
+            {
+                "message": {
+                    "message_id": "om_reply_promoted",
+                    "chat_id": "oc_same_chat",
+                    "chat_type": "group",
+                    "create_time": "2000",
+                    "message_type": "text",
+                    "content": '{"text":"hello promoted"}',
+                },
+                "sender": {"sender_id": {"open_id": "ou_owner"}},
+            },
+        )
+
+        promoted_result = runtime.wait_for_question("ask_456", 1)
+
+        self.assertEqual(active_result["text"], "hello active")
+        self.assertEqual(promoted_result["text"], "hello promoted")
 
     def test_shared_runtime_ignores_reply_before_question_is_waiting(self) -> None:
         processor = FakeEventProcessor()
