@@ -22,6 +22,7 @@
 - **执行结果推送**：LLM 把执行进度、告警或中间产物推送到飞书会话。
 - **文件资源交换**：通过飞书上传文件或图片，LLM 自动下载到本地继续处理。
 - **多会话路由**：将消息路由到指定群聊，或在首次使用时通过飞书卡片选择目标会话。
+- **节省 LLM 额度**：按次计费的 LLM（如 GitHub Copilot）中，通过飞书通道与 LLM 持续对话，交互不额外消耗对话次数。配合 [copilot-instructions.md](.github/copilot-instructions.md) 将飞书设为默认交流通道，可显著降低来回切换的开销。
 
 ## 🚀 主要特性
 
@@ -83,7 +84,24 @@ python start_mcp.py
 
 ## ▶️ 快速开始
 
-### 1. 创建飞书应用
+### 方式一：一键创建飞书应用（推荐）
+
+安装完成后，运行以下命令自动创建或选择已有飞书应用，并生成 MCP 配置：
+
+```bash
+python -m ask_user_via_feishu.new_bot
+```
+
+按提示扫码确认（或复制链接到浏览器），即可自动获取 App ID、App Secret 和 Owner Open ID，并输出可直接使用的 MCP 配置。
+
+> 💡 安装 `qrcode` 库可在终端直接显示二维码：`pip install qrcode`
+
+将输出的配置复制到你的 MCP Host 配置文件（如 `mcp.json`）中即可。
+
+<details>
+<summary>方式二：手动创建飞书应用</summary>
+
+#### 1. 创建飞书应用
 
 前往 [飞书开放平台](https://open.feishu.cn/app) 创建一个企业自建应用，获取 **App ID** 和 **App Secret**。
 
@@ -95,11 +113,11 @@ python start_mcp.py
 
 启用 **机器人** 能力，并在事件订阅中启用长连接模式。
 
-### 2. 获取 Owner Open ID
+#### 2. 获取 Owner Open ID
 
 在飞书开放平台的 API 调试台中，查询你自己的 `open_id`（以 `ou_` 开头的字符串）。
 
-### 3. 配置 MCP Host
+#### 3. 配置 MCP Host
 
 在你的 MCP Host 配置文件（如 `mcp.json`）中添加：
 
@@ -123,7 +141,9 @@ python start_mcp.py
 
 > 💡 `timeout` 建议设为较大值（如 36000000 ms = 10h），因为 `ask_user_via_feishu` 工具会长时间等待用户回复。
 
-### 4. 开始使用
+</details>
+
+### 开始使用
 
 MCP Host 启动后，LLM 即可调用以下工具与你通过飞书交互。
 
@@ -295,6 +315,7 @@ python -m build
 │   ├── schemas.py              # 类型定义（post 元素/文件类型）
 │   ├── errors.py               # 异常类型
 │   ├── runtime.py              # 工厂函数
+│   ├── new_bot.py              # 一键创建飞书应用（python -m ask_user_via_feishu.new_bot）
 │   ├── main.py                 # 入口
 │   └── logging_utils.py        # 日志配置
 ├── tests/                      # 单元测试
