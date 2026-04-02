@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -9,7 +11,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from ask_user_via_feishu.config import Settings
+from ask_user_via_feishu.config import SERVER_VERSION, Settings
 from ask_user_via_feishu.daemon.runtime import (
     DAEMON_PROTOCOL_VERSION,
     DaemonMetadata,
@@ -20,6 +22,8 @@ from ask_user_via_feishu.daemon.runtime import (
     runtime_dir_for_settings,
     startup_lock_path,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class DaemonBootstrapError(RuntimeError):
@@ -35,6 +39,55 @@ class DaemonConnectionInfo:
     runtime_dir: Path
     metadata: DaemonMetadata
     token: str
+
+
+def exit_old_daemon(
+    settings: Settings,
+    *,
+    base_dir: Path | None = None,
+    timeout_seconds: float = 1.0,
+) -> bool:
+    runtime_dir = runtime_dir_for_settings(settings, base_dir=base_dir)
+    metadata = load_metadata(runtime_dir)
+    token = load_token(runtime_dir)
+    if metadata is None or not token:
+        return False
+    health = _fetch_health(
+        metadata,
+        token,
+        require_ready=False,
+        probe_name="startup-version-check",
+    )
+    if health is None:
+        return False
+    daemon_version = str(health.get("version") or "").strip()
+    if not daemon_version or daemon_version == SERVER_VERSION:
+        return False
+    logger.info(
+        "Found outdated shared daemon version=%s current=%s; requesting exit.",
+        daemon_version,
+        SERVER_VERSION,
+    )
+    requested = _post_exit(
+        metadata,
+        token,
+        reason="version_mismatch",
+        requested_by_version=SERVER_VERSION,
+    )
+    if not requested:
+        logger.warning(
+            "Failed to request exit for outdated shared daemon version=%s current=%s.",
+            daemon_version,
+            SERVER_VERSION,
+        )
+        return False
+    _wait_for_exit(
+        runtime_dir,
+        metadata,
+        token,
+        timeout_seconds=timeout_seconds,
+    )
+    return True
 
 
 def ensure_daemon_running(
@@ -85,7 +138,7 @@ def _try_load_healthy_daemon(runtime_dir: Path, settings: Settings) -> DaemonCon
         return None
 
     expected_compatibility_hash = build_compatibility_hash(settings)
-    health = _fetch_health(metadata, token)
+    health = _fetch_health(metadata, token, require_ready=True, probe_name="bootstrap")
     if health is None:
         return None
 
@@ -98,12 +151,18 @@ def _try_load_healthy_daemon(runtime_dir: Path, settings: Settings) -> DaemonCon
     return DaemonConnectionInfo(runtime_dir=runtime_dir, metadata=metadata, token=token)
 
 
-def _fetch_health(metadata: DaemonMetadata, token: str) -> dict[str, object] | None:
+def _fetch_health(
+    metadata: DaemonMetadata,
+    token: str,
+    *,
+    require_ready: bool,
+    probe_name: str,
+) -> dict[str, object] | None:
     request = Request(
         f"http://127.0.0.1:{metadata.port}/v1/health",
         headers={
             "Authorization": f"Bearer {token}",
-            "X-Daemon-Probe": "bootstrap",
+            "X-Daemon-Probe": probe_name,
         },
         method="GET",
     )
@@ -112,14 +171,81 @@ def _fetch_health(metadata: DaemonMetadata, token: str) -> dict[str, object] | N
             raw = response.read().decode("utf-8")
     except (HTTPError, URLError, TimeoutError, OSError):
         return None
-    import json
-
-    payload = json.loads(raw)
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
     if not isinstance(payload, dict):
         return None
-    if not payload.get("ok") or not payload.get("ready"):
+    if not payload.get("ok"):
+        return None
+    if require_ready and not payload.get("ready"):
         return None
     return payload
+
+
+def _post_exit(
+    metadata: DaemonMetadata,
+    token: str,
+    *,
+    reason: str,
+    requested_by_version: str,
+) -> bool:
+    body = json.dumps(
+        {
+            "reason": reason,
+            "requested_by_version": requested_by_version,
+        }
+    ).encode("utf-8")
+    request = Request(
+        f"http://127.0.0.1:{metadata.port}/v1/exit",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=0.5) as response:
+            raw = response.read().decode("utf-8")
+    except (HTTPError, URLError, TimeoutError, OSError):
+        return False
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and bool(payload.get("ok"))
+
+
+def _wait_for_exit(
+    runtime_dir: Path,
+    metadata: DaemonMetadata,
+    token: str,
+    *,
+    timeout_seconds: float,
+) -> None:
+    deadline = time.monotonic() + max(timeout_seconds, 0.0)
+    while time.monotonic() < deadline:
+        current_health = _fetch_health(
+            metadata,
+            token,
+            require_ready=False,
+            probe_name="startup-version-check",
+        )
+        try:
+            current_metadata = load_metadata(runtime_dir)
+        except FileNotFoundError:
+            current_metadata = None
+        try:
+            current_token = load_token(runtime_dir)
+        except FileNotFoundError:
+            current_token = ""
+        metadata_cleared = current_metadata is None or current_metadata.daemon_epoch != metadata.daemon_epoch
+        token_cleared = not current_token or current_token != token
+        if current_health is None and metadata_cleared and token_cleared:
+            return
+        time.sleep(0.05)
 
 
 def _spawn_daemon_process(runtime_dir: Path, settings: Settings) -> None:

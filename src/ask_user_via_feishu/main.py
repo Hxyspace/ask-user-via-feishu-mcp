@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ask_user_via_feishu.config import SERVER_TRANSPORT, Settings
+from ask_user_via_feishu.daemon.bootstrap import exit_old_daemon
 from ask_user_via_feishu.daemon.app import run_shared_longconn_daemon
 from ask_user_via_feishu.logging_utils import configure_logging
 from ask_user_via_feishu.server import create_server
@@ -22,6 +23,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         runtime_dir = Path(parsed_args.daemon_runtime_dir).expanduser().resolve() if parsed_args.daemon_runtime_dir else None
         run_shared_longconn_daemon(settings, runtime_dir=runtime_dir)
         return
+    exit_old_daemon(settings)
     server = create_server(settings)
     server.run(transport=SERVER_TRANSPORT)
 

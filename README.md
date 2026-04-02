@@ -270,7 +270,7 @@ Multiple MCP Host processes            │  └───────────
 
 - **MCP Server**：stdio 进程，挂载到 MCP Host 中，暴露 5 个工具。
 - **Shared Daemon**：后台单例进程，维护与飞书的 WebSocket 长连接，接收事件并分发。多个 MCP 进程共享同一个 daemon。
-- **自动生命周期**：首次调用 ask/send 时自动启动 daemon；daemon 空闲超时后自动退出；下次调用时再自动拉起。
+- **自动生命周期**：MCP 客户端启动时会 best-effort 探测已有 daemon 版本，不一致时请求旧 daemon 退出；首次调用 ask/send 时自动启动 daemon；daemon 空闲超时后自动退出；下次调用时再自动拉起。
 - **Per-chat 队列**：每个目标会话有独立的 FIFO 提问队列，不同会话可并行提问。
 
 ## 🧪 开发

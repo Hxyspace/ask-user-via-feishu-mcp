@@ -40,6 +40,7 @@ class SharedLongConnDaemonServer:
         *,
         ask_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         send_handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
+        exit_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         status_provider: Callable[[], dict[str, Any]] | None = None,
         on_request_started: Callable[[str], None] | None = None,
         on_request_finished: Callable[[str], None] | None = None,
@@ -52,6 +53,7 @@ class SharedLongConnDaemonServer:
         self._cleaned_up = False
         self._ask_handler = ask_handler
         self._send_handlers = dict(send_handlers or {})
+        self._exit_handler = exit_handler
         self._status_provider = status_provider
         self._on_request_started = on_request_started
         self._on_request_finished = on_request_finished
@@ -208,6 +210,28 @@ class SharedLongConnDaemonServer:
         try:
             if track_activity:
                 self._notify_request_started(handler.path)
+            if handler.path == "/v1/exit":
+                if self._exit_handler is None:
+                    self._send_json(handler, HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
+                    return
+                try:
+                    request_payload = self._read_json_body(handler)
+                    response_payload = self._exit_handler(request_payload)
+                except ValueError as exc:
+                    self._send_json(handler, HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+                    return
+                except MessageValidationError as exc:
+                    self._send_json(handler, HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+                    return
+                except RuntimeError as exc:
+                    self._send_json(handler, HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
+                    return
+                if "protocol_version" not in response_payload:
+                    response_payload["protocol_version"] = self._metadata.protocol_version
+                if "daemon_epoch" not in response_payload:
+                    response_payload["daemon_epoch"] = self._daemon_epoch
+                self._send_json(handler, HTTPStatus.OK, response_payload)
+                return
             route_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None
             if handler.path == "/v1/ask_and_wait":
                 route_handler = self._ask_handler
@@ -315,8 +339,9 @@ class SharedLongConnDaemonServer:
 
     @staticmethod
     def _should_track_request_activity(handler: BaseHTTPRequestHandler) -> bool:
+        probe_name = str(handler.headers.get("X-Daemon-Probe") or "").strip().lower()
         return not (
             getattr(handler, "command", "").upper() == "GET"
             and handler.path == "/v1/health"
-            and str(handler.headers.get("X-Daemon-Probe") or "").strip().lower() == "bootstrap"
+            and probe_name in {"bootstrap", "startup-version-check"}
         )

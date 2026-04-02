@@ -164,6 +164,35 @@ class DaemonAppTest(unittest.TestCase):
         self.assertEqual(status["queue_exempt_question_ids"], ["select_target_123"])
         app._server.shutdown.assert_called_once()
 
+    def test_manual_exit_updates_state_and_shuts_down_daemon(self) -> None:
+        service = FakeMessageService()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            with (
+                patch("ask_user_via_feishu.daemon.app.build_message_service", return_value=service),
+                patch("ask_user_via_feishu.daemon.app.build_event_processor", return_value=object()),
+                patch("ask_user_via_feishu.daemon.app.FeishuSharedLongConnectionRuntime", return_value=FakeSharedRuntime()),
+            ):
+                app = SharedLongConnDaemonApp(self._settings(), runtime_dir=runtime_dir)
+                self.addCleanup(app._server.close)
+                app._server.shutdown = Mock()
+
+                response = app._request_exit(
+                    {
+                        "reason": "version_mismatch",
+                        "requested_by_version": "999.0.0",
+                    }
+                )
+                if app._manual_shutdown_thread is not None:
+                    app._manual_shutdown_thread.join(1)
+
+        self.assertTrue(response["shutdown_requested"])
+        self.assertEqual(response["daemon_state"], "retiring_manual")
+        self.assertEqual(response["reason"], "version_mismatch")
+        self.assertEqual(response["requested_by_version"], "999.0.0")
+        self.assertEqual(app._status()["daemon_state"], "shutting_down")
+        app._server.shutdown.assert_called_once()
+
     def test_request_activity_updates_inflight_and_timestamp(self) -> None:
         service = FakeMessageService()
         shared_runtime = FakeSharedRuntime()

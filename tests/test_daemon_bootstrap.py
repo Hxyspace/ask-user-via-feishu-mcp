@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import tempfile
 from pathlib import Path
 import unittest
@@ -11,8 +12,15 @@ from ask_user_via_feishu.daemon.bootstrap import (
     DaemonConnectionInfo,
     _spawn_daemon_process,
     ensure_daemon_running,
+    exit_old_daemon,
 )
-from ask_user_via_feishu.daemon.runtime import DAEMON_PROTOCOL_VERSION, DaemonMetadata, runtime_dir_for_settings
+from ask_user_via_feishu.daemon.runtime import (
+    DAEMON_PROTOCOL_VERSION,
+    DaemonMetadata,
+    load_metadata,
+    load_token,
+    runtime_dir_for_settings,
+)
 from ask_user_via_feishu.daemon.server import SharedLongConnDaemonServer
 
 
@@ -71,6 +79,38 @@ class DaemonBootstrapTest(unittest.TestCase):
 
             with self.assertRaises(DaemonCompatibilityError):
                 ensure_daemon_running(client_settings, base_dir=base_dir)
+
+    def test_exit_old_daemon_requests_exit_for_version_mismatch(self) -> None:
+        settings = Settings(app_id="cli_demo", app_secret="secret_demo", owner_open_id="ou_demo")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            runtime_dir = runtime_dir_for_settings(settings, base_dir=base_dir)
+            daemon: SharedLongConnDaemonServer | None = None
+
+            def exit_handler(_payload: dict[str, object]) -> dict[str, object]:
+                assert daemon is not None
+                threading.Thread(target=daemon.shutdown, daemon=True).start()
+                return {
+                    "ok": True,
+                    "shutdown_requested": True,
+                    "daemon_state": "shutting_down",
+                }
+
+            daemon = SharedLongConnDaemonServer(settings, runtime_dir, exit_handler=exit_handler)
+            thread = daemon.start_background()
+            self.addCleanup(thread.join, 1)
+
+            with patch("ask_user_via_feishu.daemon.bootstrap.SERVER_VERSION", "999.0.0"):
+                requested = exit_old_daemon(settings, base_dir=base_dir, timeout_seconds=1.0)
+
+            thread.join(1)
+            metadata = load_metadata(runtime_dir)
+            token = load_token(runtime_dir)
+
+            self.assertTrue(requested)
+            self.assertFalse(thread.is_alive())
+            self.assertIsNone(metadata)
+            self.assertEqual(token, "")
 
     def test_ensure_daemon_running_spawns_and_waits_when_missing(self) -> None:
         settings = Settings(app_id="cli_demo", app_secret="secret_demo", owner_open_id="ou_demo")

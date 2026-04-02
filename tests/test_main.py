@@ -17,11 +17,13 @@ class MainTest(unittest.TestCase):
         with (
             patch("ask_user_via_feishu.main.Settings.from_env", return_value=fake_settings),
             patch("ask_user_via_feishu.main.configure_logging"),
+            patch("ask_user_via_feishu.main.exit_old_daemon") as retire_mock,
             patch("ask_user_via_feishu.main.create_server", return_value=fake_server),
         ):
             main()
 
         fake_settings.validate.assert_called_once_with()
+        retire_mock.assert_called_once_with(fake_settings)
         fake_server.run.assert_called_once_with(transport=SERVER_TRANSPORT)
 
     def test_main_can_run_daemon_mode(self) -> None:
@@ -32,11 +34,13 @@ class MainTest(unittest.TestCase):
         with (
             patch("ask_user_via_feishu.main.Settings.from_env", return_value=fake_settings),
             patch("ask_user_via_feishu.main.configure_logging"),
+            patch("ask_user_via_feishu.main.exit_old_daemon") as retire_mock,
             patch("ask_user_via_feishu.main.run_shared_longconn_daemon") as run_daemon_mock,
             patch("ask_user_via_feishu.main.create_server") as create_server_mock,
         ):
             main(["--shared-longconn-daemon", "--daemon-runtime-dir", "/tmp/daemon-runtime"])
 
         fake_settings.validate.assert_called_once_with()
+        retire_mock.assert_not_called()
         create_server_mock.assert_not_called()
         run_daemon_mock.assert_called_once()

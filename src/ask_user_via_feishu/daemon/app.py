@@ -24,6 +24,7 @@ class SharedLongConnDaemonApp:
         self._failure_reason = ""
         self._lifecycle_lock = threading.Lock()
         self._retirement_thread: threading.Thread | None = None
+        self._manual_shutdown_thread: threading.Thread | None = None
         self._terminal_shutdown_delay_seconds = 1.0
         current_time = time.monotonic()
         self._started_at_monotonic = current_time
@@ -56,6 +57,7 @@ class SharedLongConnDaemonApp:
                 "/v1/send_file_message": self._send_file_message,
                 "/v1/send_post_message": self._send_post_message,
             },
+            exit_handler=self._request_exit,
             status_provider=self._status,
             on_request_started=self._record_request_started,
             on_request_finished=self._record_request_finished,
@@ -240,6 +242,25 @@ class SharedLongConnDaemonApp:
             retry_stage="before_send",
         )
 
+    def _request_exit(self, payload: dict[str, Any]) -> dict[str, Any]:
+        reason = str(payload.get("reason") or "manual_request").strip() or "manual_request"
+        requested_by_version = str(payload.get("requested_by_version") or "").strip()
+        should_schedule = False
+        with self._lifecycle_lock:
+            if self._daemon_state not in {"retiring_manual", "shutting_down"}:
+                self._daemon_state = "retiring_manual"
+                should_schedule = True
+            daemon_state = self._daemon_state
+        if should_schedule:
+            self._schedule_manual_shutdown()
+        return {
+            "ok": True,
+            "shutdown_requested": True,
+            "daemon_state": daemon_state,
+            "reason": reason,
+            "requested_by_version": requested_by_version,
+        }
+
     def _handle_terminal_failure(self, exc: BaseException) -> None:
         failure_reason = str(exc).strip() or exc.__class__.__name__
         should_schedule = False
@@ -251,6 +272,13 @@ class SharedLongConnDaemonApp:
             should_schedule = True
         if should_schedule:
             self._schedule_retirement()
+
+    def _schedule_manual_shutdown(self) -> None:
+        with self._lifecycle_lock:
+            if self._manual_shutdown_thread is not None and self._manual_shutdown_thread.is_alive():
+                return
+            self._manual_shutdown_thread = threading.Thread(target=self._shutdown_now, daemon=True)
+            self._manual_shutdown_thread.start()
 
     def _schedule_retirement(self) -> None:
         with self._lifecycle_lock:
@@ -266,6 +294,12 @@ class SharedLongConnDaemonApp:
 
             self._retirement_thread = threading.Thread(target=retire, daemon=True)
             self._retirement_thread.start()
+
+    def _shutdown_now(self) -> None:
+        with self._lifecycle_lock:
+            if self._daemon_state != "shutting_down":
+                self._daemon_state = "shutting_down"
+        self._server.shutdown()
 
 
 def run_shared_longconn_daemon(settings: Settings, *, runtime_dir: Path | None = None) -> None:

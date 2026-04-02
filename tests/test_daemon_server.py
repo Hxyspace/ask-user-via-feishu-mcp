@@ -172,6 +172,48 @@ class DaemonServerTest(unittest.TestCase):
         self.assertEqual(error.exception.code, 503)
         self.assertEqual(response["error_code"], "daemon_not_serving")
 
+    def test_exit_route_bypasses_serving_gate_and_returns_handler_result(self) -> None:
+        settings = Settings(
+            app_id="cli_demo",
+            app_secret="secret_demo",
+            owner_open_id="ou_demo",
+        )
+        captured_payload: dict[str, object] = {}
+
+        def exit_handler(payload: dict[str, object]) -> dict[str, object]:
+            captured_payload.update(payload)
+            return {
+                "ok": True,
+                "shutdown_requested": True,
+                "daemon_state": "retiring_manual",
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            daemon = SharedLongConnDaemonServer(
+                settings,
+                Path(tmpdir),
+                exit_handler=exit_handler,
+                status_provider=lambda: {"daemon_state": "retiring_idle"},
+            )
+            thread = daemon.start_background()
+            self.addCleanup(daemon.shutdown)
+            self.addCleanup(thread.join, 1)
+
+            response = self._post_json(
+                f"http://127.0.0.1:{daemon.metadata.port}/v1/exit",
+                token=daemon.token,
+                payload={
+                    "reason": "version_mismatch",
+                    "requested_by_version": "999.0.0",
+                },
+            )
+
+        self.assertEqual(captured_payload["reason"], "version_mismatch")
+        self.assertEqual(captured_payload["requested_by_version"], "999.0.0")
+        self.assertTrue(response["shutdown_requested"])
+        self.assertEqual(response["daemon_state"], "retiring_manual")
+        self.assertEqual(response["daemon_epoch"], daemon.metadata.daemon_epoch)
+
     def test_health_and_status_reflect_terminal_daemon_state(self) -> None:
         settings = Settings(
             app_id="cli_demo",
@@ -342,6 +384,35 @@ class DaemonServerTest(unittest.TestCase):
                 f"http://127.0.0.1:{daemon.metadata.port}/v1/health",
                 token=daemon.token,
                 extra_headers={"X-Daemon-Probe": "bootstrap"},
+            )
+
+        self.assertEqual(started, [])
+        self.assertEqual(finished, [])
+
+    def test_startup_version_probe_health_does_not_notify_request_callbacks(self) -> None:
+        settings = Settings(
+            app_id="cli_demo",
+            app_secret="secret_demo",
+            owner_open_id="ou_demo",
+        )
+        started: list[str] = []
+        finished: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            daemon = SharedLongConnDaemonServer(
+                settings,
+                Path(tmpdir),
+                on_request_started=started.append,
+                on_request_finished=finished.append,
+            )
+            thread = daemon.start_background()
+            self.addCleanup(daemon.shutdown)
+            self.addCleanup(thread.join, 1)
+
+            self._fetch_json(
+                f"http://127.0.0.1:{daemon.metadata.port}/v1/health",
+                token=daemon.token,
+                extra_headers={"X-Daemon-Probe": "startup-version-check"},
             )
 
         self.assertEqual(started, [])
