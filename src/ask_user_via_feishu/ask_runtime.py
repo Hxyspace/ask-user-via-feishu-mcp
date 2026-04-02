@@ -143,7 +143,7 @@ class AskRuntimeOrchestrator:
         self._service = service
         self._shared_runtime = shared_runtime
         self._download_root = None if download_root is None else download_root.expanduser().resolve()
-        self._pending_processing_reaction: dict[str, str] | None = None
+        self._pending_processing_reactions: dict[str, dict[str, object]] = {}
 
     async def ask(
         self,
@@ -179,7 +179,6 @@ class AskRuntimeOrchestrator:
                 "Shared Feishu long connection is unavailable before sending the question.",
                 retry_stage="before_send",
             ) from exc
-        await self._best_effort_clear_processing_reaction()
         resolved_question_id = str(question_id or f"ask_{uuid_lib.uuid4().hex[:8]}").strip()
         if not resolved_question_id:
             raise ValueError("question_id must not be empty.")
@@ -215,6 +214,10 @@ class AskRuntimeOrchestrator:
                     "Shared Feishu long connection failed before sending the question.",
                     retry_stage="before_send",
                 ) from exc
+            await self.clear_processing_reaction(
+                receive_id_type=resolved_receive_id_type,
+                receive_id=resolved_receive_id,
+            )
             send_result = await self._service.send_interactive(
                 receive_id_type=resolved_receive_id_type,
                 receive_id=resolved_receive_id,
@@ -272,6 +275,11 @@ class AskRuntimeOrchestrator:
             await self._best_effort_mark_reply_processing(
                 reply_message_id=str(wait_result.get("message_id") or ""),
                 reply_message_type=str(wait_result.get("message_type") or ""),
+                scope_keys=_reaction_scope_keys(
+                    chat_id=str(wait_result.get("chat_id") or ""),
+                    receive_id_type=resolved_receive_id_type,
+                    receive_id=resolved_receive_id,
+                ),
             )
             downloaded_paths = await self._service.download_reply_resources(
                 question_id=resolved_question_id,
@@ -383,34 +391,70 @@ class AskRuntimeOrchestrator:
         except (FeishuAPIError, MessageValidationError) as exc:
             logger.warning("Failed to update ask_user card message_id=%s: %s", message_id, exc)
 
-    async def _best_effort_clear_processing_reaction(self) -> None:
-        if self._pending_processing_reaction is None:
+    async def clear_processing_reaction(
+        self,
+        *,
+        receive_id_type: str,
+        receive_id: str,
+        chat_id: str = "",
+    ) -> None:
+        await self._best_effort_clear_processing_reaction(
+            scope_keys=_reaction_scope_keys(
+                chat_id=chat_id,
+                receive_id_type=receive_id_type,
+                receive_id=receive_id,
+            )
+        )
+
+    async def _best_effort_clear_processing_reaction(self, *, scope_keys: tuple[str, ...]) -> None:
+        reaction = self._find_processing_reaction(scope_keys)
+        if reaction is None:
             return
         try:
             await self._service.delete_reaction(
-                message_id=self._pending_processing_reaction["message_id"],
-                reaction_id=self._pending_processing_reaction["reaction_id"],
+                message_id=str(reaction["message_id"]),
+                reaction_id=str(reaction["reaction_id"]),
             )
-            self._pending_processing_reaction = None
+            self._forget_processing_reaction(reaction)
         except (FeishuAPIError, MessageValidationError) as exc:
             logger.warning("Failed to clear processing reaction: %s", exc)
 
-    async def _best_effort_mark_reply_processing(self, *, reply_message_id: str, reply_message_type: str) -> None:
+    async def _best_effort_mark_reply_processing(
+        self,
+        *,
+        reply_message_id: str,
+        reply_message_type: str,
+        scope_keys: tuple[str, ...],
+    ) -> None:
         if not self._settings.reaction_enabled:
             return
-        if not reply_message_id.strip() or reply_message_type == "card_action":
+        if not reply_message_id.strip() or reply_message_type == "card_action" or not scope_keys:
             return
         try:
             created = await self._service.create_reaction(
                 message_id=reply_message_id,
                 emoji_type=self._settings.reaction_emoji_type,
             )
-            self._pending_processing_reaction = {
+            reaction = {
                 "message_id": str(created.get("message_id") or reply_message_id),
                 "reaction_id": str(created.get("reaction_id") or ""),
+                "scope_keys": scope_keys,
             }
+            for scope_key in scope_keys:
+                self._pending_processing_reactions[scope_key] = reaction
         except (FeishuAPIError, MessageValidationError) as exc:
             logger.warning("Failed to mark reply as processing message_id=%s: %s", reply_message_id, exc)
+
+    def _find_processing_reaction(self, scope_keys: tuple[str, ...]) -> dict[str, object] | None:
+        for scope_key in scope_keys:
+            reaction = self._pending_processing_reactions.get(scope_key)
+            if reaction is not None:
+                return reaction
+        return None
+
+    def _forget_processing_reaction(self, reaction: dict[str, object]) -> None:
+        for scope_key in tuple(reaction.get("scope_keys") or ()):
+            self._pending_processing_reactions.pop(str(scope_key), None)
 
 
 def _resolve_sent_at_ms(send_result: dict[str, Any]) -> int:
@@ -418,3 +462,20 @@ def _resolve_sent_at_ms(send_result: dict[str, Any]) -> int:
     if sent_at_ms > 0:
         return sent_at_ms
     return int(time.time() * 1000)
+
+
+def _reaction_scope_keys(
+    *,
+    chat_id: str,
+    receive_id_type: str,
+    receive_id: str,
+) -> tuple[str, ...]:
+    keys: list[str] = []
+    normalized_chat_id = str(chat_id or "").strip()
+    normalized_receive_id_type = str(receive_id_type or "").strip()
+    normalized_receive_id = str(receive_id or "").strip()
+    if normalized_chat_id:
+        keys.append(f"chat_id:{normalized_chat_id}")
+    if normalized_receive_id_type and normalized_receive_id:
+        keys.append(f"{normalized_receive_id_type}:{normalized_receive_id}")
+    return tuple(dict.fromkeys(keys))

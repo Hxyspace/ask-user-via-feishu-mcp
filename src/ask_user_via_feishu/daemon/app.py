@@ -191,6 +191,13 @@ class SharedLongConnDaemonApp:
         }
 
     def _run_message_service(self, method_name: str, **kwargs: Any) -> dict[str, Any]:
+        if method_name.startswith("send_"):
+            asyncio.run(
+                self._ask_runtime.clear_processing_reaction(
+                    receive_id_type=str(kwargs.get("receive_id_type") or "open_id"),
+                    receive_id=str(kwargs.get("receive_id") or ""),
+                )
+            )
         return asyncio.run(getattr(self._message_service, method_name)(**kwargs))
 
     def _send_text_message(self, payload: dict[str, Any]) -> dict[str, Any]:

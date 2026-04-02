@@ -160,6 +160,26 @@ class FakeAnsweredRuntime(ImmediateSendableRuntimeMixin):
         }
 
 
+class FakeQueuedAnswerRuntime(ImmediateSendableRuntimeMixin):
+    def __init__(self, results: list[dict[str, object]]) -> None:
+        self._results = [dict(result) for result in results]
+
+    def ensure_started(self) -> None:
+        return None
+
+    def register_pending_question(self, **kwargs):
+        return None
+
+    def mark_waiting_for_reply(self, question_id: str, **kwargs) -> None:
+        return None
+
+    def unregister_pending_question(self, question_id: str) -> None:
+        return None
+
+    def wait_for_question(self, question_id: str, timeout_seconds: int):
+        return self._results.pop(0)
+
+
 class FakeRollbackRuntime(ImmediateSendableRuntimeMixin):
     last_instance = None
 
@@ -774,6 +794,63 @@ class AskRuntimeTest(unittest.TestCase):
             fake_service.deleted_reactions,
             [{"message_id": "om_reply", "reaction_id": "reaction_123"}],
         )
+
+    def test_different_target_ask_does_not_clear_previous_processing_reaction(self) -> None:
+        settings = self._settings(REACTION_ENABLED="true")
+        fake_service = FakeTimeoutMessageService()
+        runtime = FakeQueuedAnswerRuntime(
+            [
+                {
+                    "message_id": "om_reply_p2p",
+                    "chat_id": "oc_p2p",
+                    "message_type": "text",
+                    "text": "first",
+                    "message_content": {"text": "first"},
+                    "callback_response": {},
+                },
+                {
+                    "message_id": "om_reply_group",
+                    "chat_id": "oc_group_123",
+                    "message_type": "text",
+                    "text": "second",
+                    "message_content": {"text": "second"},
+                    "callback_response": {},
+                },
+            ]
+        )
+        orchestrator = AskRuntimeOrchestrator(settings, fake_service, runtime)
+
+        first_result = asyncio.run(
+            orchestrator.ask(
+                question="第一问",
+                choices=None,
+                uuid=None,
+                receive_id_type="open_id",
+                receive_id=settings.owner_open_id,
+                wait_options=build_wait_options(settings),
+            )
+        )
+        second_result = asyncio.run(
+            orchestrator.ask(
+                question="第二问",
+                choices=None,
+                uuid=None,
+                receive_id_type="chat_id",
+                receive_id="oc_group_123",
+                wait_options=build_wait_options(settings),
+            )
+        )
+
+        self.assertEqual(first_result["status"], "answered")
+        self.assertEqual(second_result["status"], "answered")
+        self.assertEqual(
+            fake_service.created_reactions,
+            [
+                {"message_id": "om_reply_p2p", "emoji_type": "Typing"},
+                {"message_id": "om_reply_group", "emoji_type": "Typing"},
+            ],
+        )
+        self.assertEqual(fake_service.deleted_reactions, [])
 
     def test_mark_waiting_uses_send_result_chat_and_time(self) -> None:
         settings = self._settings()

@@ -193,6 +193,32 @@ class DaemonAppTest(unittest.TestCase):
         self.assertEqual(app._status()["daemon_state"], "shutting_down")
         app._server.shutdown.assert_called_once()
 
+    def test_send_text_clears_processing_reaction_before_send(self) -> None:
+        service = FakeMessageService()
+        service.send_text = AsyncMock(return_value={"ok": True, "message_id": "om_123"})  # type: ignore[attr-defined]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            with (
+                patch("ask_user_via_feishu.daemon.app.build_message_service", return_value=service),
+                patch("ask_user_via_feishu.daemon.app.build_event_processor", return_value=object()),
+                patch("ask_user_via_feishu.daemon.app.FeishuSharedLongConnectionRuntime", return_value=FakeSharedRuntime()),
+            ):
+                app = SharedLongConnDaemonApp(self._settings(), runtime_dir=runtime_dir)
+                self.addCleanup(app._server.close)
+                clear_mock = AsyncMock()
+                app._ask_runtime.clear_processing_reaction = clear_mock  # type: ignore[method-assign]
+
+                app._send_text_message(
+                    {
+                        "text": "hello",
+                        "receive_id_type": "chat_id",
+                        "receive_id": "oc_demo",
+                    }
+                )
+
+        clear_mock.assert_awaited_once_with(receive_id_type="chat_id", receive_id="oc_demo")
+        service.send_text.assert_awaited_once()
+
     def test_request_activity_updates_inflight_and_timestamp(self) -> None:
         service = FakeMessageService()
         shared_runtime = FakeSharedRuntime()
