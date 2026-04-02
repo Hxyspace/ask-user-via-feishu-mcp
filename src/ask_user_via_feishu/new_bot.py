@@ -14,10 +14,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-try:
-    import qrcode  # type: ignore[import-untyped]
-except ImportError:
-    qrcode = None  # type: ignore[assignment]
+import qrcode  # type: ignore[import-untyped]
 
 ENDPOINTS = {
     "feishu": {
@@ -130,21 +127,35 @@ def poll_registration(
     raise AppCreationError("请求超时，请重试")
 
 
+def _print_qr(url: str) -> None:
+    """Print a QR code for the given URL to the terminal."""
+    qr = qrcode.QRCode(box_size=1, border=1)
+    qr.add_data(url)
+    qr.make(fit=True)
+    qr.print_ascii(invert=True)
+
+
 def show_qr(user_code: str, brand: str = "feishu") -> str:
     full_url = f"{ENDPOINTS[brand]['open']}/page/cli?user_code={user_code}"
     print(f"\n验证链接: {full_url}\n")
-
-    if qrcode is not None:
-        qr = qrcode.QRCode(box_size=1, border=1)
-        qr.add_data(full_url)
-        qr.make(fit=True)
-        qr.print_ascii(invert=True)
-        print("请在飞书中扫码确认，创建或选择已有应用。如果扫码失败请手动复制链接到浏览器打开。")
-    else:
-        print("请复制上方链接到浏览器打开，创建或选择已有应用。")
-        print("(安装 qrcode 库可在终端直接显示二维码: pip install qrcode)")
+    _print_qr(full_url)
+    print("请在飞书中扫码确认，创建或选择已有应用。如果扫码失败请手动复制链接到浏览器打开。")
 
     return full_url
+
+
+def show_callback_setup(app_id: str) -> None:
+    """Guide user to add card.action.trigger callback for interactive cards."""
+    callback_url = f"https://open.feishu.cn/app/{app_id}/event?tab=callback"
+    print(f"\n{'=' * 40}")
+    print("📌 还需要一步：添加卡片回调配置")
+    print(f"{'=' * 40}")
+    print(f"\n配置链接: {callback_url}\n")
+    _print_qr(callback_url)
+    print("请打开上方链接（或扫码），完成以下操作：")
+    print("  1. 添加事件：card.action.trigger（卡片回传交互）")
+    print("  2. 创建一个版本并发布")
+    print("\n完成后，卡片按钮交互功能即可正常使用。")
 
 
 def create_app() -> dict[str, str]:
@@ -203,6 +214,8 @@ def create_app() -> dict[str, str]:
     }
     print(f"\n📋 MCP 配置（复制到 mcp.json 中）：")
     print(json.dumps(mcp_config, ensure_ascii=False, indent=2))
+
+    show_callback_setup(final["app_id"])
 
     return final
 

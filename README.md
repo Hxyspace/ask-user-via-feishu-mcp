@@ -94,9 +94,15 @@ python -m ask_user_via_feishu.new_bot
 
 按提示扫码确认（或复制链接到浏览器），即可自动获取 App ID、App Secret 和 Owner Open ID，并输出可直接使用的 MCP 配置。
 
-> 💡 安装 `qrcode` 库可在终端直接显示二维码：`pip install qrcode`
-
 将输出的配置复制到你的 MCP Host 配置文件（如 `mcp.json`）中即可。
+
+> ⚠️ 创建完应用后，脚本会提示你添加**卡片回调配置**（`card.action.trigger`），这是卡片按钮交互功能所必需的。请按提示打开链接，添加事件并创建版本发布。
+
+<details>
+<summary>📸 回调配置示例</summary>
+
+![回调配置](docs/screenshot/feishu_fallback.png)
+</details>
 
 <details>
 <summary>方式二：手动创建飞书应用</summary>
@@ -111,7 +117,7 @@ python -m ask_user_via_feishu.new_bot
 - `im:chat` — 读取群信息
 - `im:resource` — 下载消息中的资源文件
 
-启用 **机器人** 能力，并在事件订阅中启用长连接模式。
+启用 **机器人** 能力，在事件订阅中启用长连接模式，并添加 `card.action.trigger`（卡片回传交互）事件回调。
 
 #### 2. 获取 Owner Open ID
 
@@ -320,6 +326,8 @@ python -m build
 │   ├── main.py                 # 入口
 │   └── logging_utils.py        # 日志配置
 ├── tests/                      # 单元测试
+├── docs/
+│   └── screenshot/             # 截图资源
 ├── examples/
 │   └── mcpServers.ask-user-via-feishu.json
 ├── pyproject.toml
@@ -327,6 +335,21 @@ python -m build
 ├── start_mcp.py                # 一键启动脚本
 └── LICENSE
 ```
+
+## 📸 效果展示
+
+<table>
+  <tr>
+    <td align="center"><b>LLM 发送提问卡片</b></td>
+    <td align="center"><b>用户回复</b></td>
+    <td align="center"><b>会话选择</b></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshot/ask.png" width="280" /></td>
+    <td><img src="docs/screenshot/reply.png" width="280" /></td>
+    <td><img src="docs/screenshot/select_chat.png" width="280" /></td>
+  </tr>
+</table>
 
 ## ⚠️ 已知限制
 
